@@ -14,7 +14,6 @@ import {
   Paperclip,
   RefreshCcw,
   Reply,
-  Search,
   Send,
   Smile,
   Sparkles,
@@ -28,7 +27,7 @@ import { EmptyState, Pill } from "./comunicacionesShared";
 import { EMOJI_GROUPS, INBOXES, QUICK_EMOJIS } from "./liveNos/constants";
 import {
   ComposerIconButton,
-  ConversationCard,
+  ConversationsColumn,
   HeaderButton,
   InboxList,
   MessageStatusIcon,
@@ -3078,47 +3077,15 @@ function handleMicButtonClick() {
     <SellersList profiles={profiles} />
   </aside>
 
-  <section className="flex min-h-0 flex-col overflow-hidden rounded-[28px] border border-black/10 bg-white/80 shadow-sm">
-    <div className="shrink-0 border-b border-black/10 p-3">
-      <div className="flex h-10 items-center gap-2 rounded-2xl border border-black/10 bg-[#f8fafc] px-3">
-        <Search size={15} className="text-[#94a3b8]" />
-
-        <input
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-          placeholder="Buscar conversación..."
-          className="h-full min-w-0 flex-1 bg-transparent text-sm font-bold text-[#142033] outline-none placeholder:text-[#94a3b8]"
-        />
-      </div>
-
-      <div className="mt-2 text-xs font-bold text-[#64748b]">
-        {filteredConversations.length} conversaciones en{" "}
-        {INBOXES.find((item) => item.id === activeInbox)?.label}
-      </div>
-    </div>
-
-    <div className="min-h-0 flex-1 space-y-2 overflow-auto p-3">
-      {loading ? (
-        <div className="flex h-48 items-center justify-center">
-          <Loader2 size={22} className="animate-spin text-[#4f7c90]" />
-        </div>
-      ) : filteredConversations.length === 0 ? (
-        <EmptyState
-          title="Sin conversaciones"
-          subtitle="Cuando ingresen mensajes por WhatsApp aparecerán en esta bandeja."
-        />
-      ) : (
-        filteredConversations.map((conv) => (
-          <ConversationCard
-            key={conv.id}
-            conv={conv}
-            selectedId={selectedId}
-            onSelect={selectConversation}
-          />
-        ))
-      )}
-    </div>
-  </section>
+<ConversationsColumn
+  loading={loading}
+  search={search}
+  activeInbox={activeInbox}
+  selectedId={selectedId}
+  filteredConversations={filteredConversations}
+  onSearchChange={setSearch}
+  onSelectConversation={selectConversation}
+/>
 
           <section className="flex min-h-0 flex-col overflow-hidden rounded-[28px] border border-black/10 bg-white/80 shadow-sm">
             {!selectedConversation ? (
