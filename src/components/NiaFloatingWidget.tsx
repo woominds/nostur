@@ -52,6 +52,8 @@ type ChatMessage = {
   direction: "user" | "assistant";
   text: string;
   tool?: string;
+  audit_id?: string | null;
+  feedback_rating?: "positive" | "negative" | null;
 };
 
 function isInternalUrl(activeUrl: string): boolean {
@@ -181,29 +183,40 @@ function getInitialMessages(context: NiaContext | null): ChatMessage[] {
         text: `Estoy viendo el contexto real de LiveNos.\n\n${buildNiaContextSummary(
           context
         )}\n\nPodés pedirme, por ejemplo:\n• Resumí esta conversación.\n• Decime qué debería responder el vendedor.\n• Detectá si está caliente o fría.\n• Decime si conviene activar, pausar o derivar CANDE.`,
-        tool: "contexto_livenos"
+        tool: "contexto_livenos",
+        audit_id: null,
+        feedback_rating: null
       }
     ];
   }
 
- return [
-  {
-    id: crypto.randomUUID(),
-    direction: "assistant",
-    text:
-      context?.module && context.module !== "general"
-        ? `Estoy parada en el módulo ${context.module}.\n\nPodés pedirme un resumen, alertas, diagnóstico comercial o próximas acciones según esta pantalla.`
-        : "Hola, soy NIA. Puedo ayudarte con oportunidades, conversaciones, reportes, alertas comerciales y acciones internas."
-  }
-];
+  return [
+    {
+      id: crypto.randomUUID(),
+      direction: "assistant",
+      text:
+        context?.module && context.module !== "general"
+          ? `Estoy parada en el módulo ${context.module}.\n\nPodés pedirme un resumen, alertas, diagnóstico comercial o próximas acciones según esta pantalla.`
+          : "Hola, soy NIA. Puedo ayudarte con oportunidades, conversaciones, reportes, alertas comerciales y acciones internas.",
+      audit_id: null,
+      feedback_rating: null
+    }
+  ];
 }
 
 export function NiaFloatingWidget({ activeUrl }: NiaFloatingWidgetProps) {
   const [open, setOpen] = useState(false);
   const [context, setContext] = useState<NiaContext | null>(null);
- const [input, setInput] = useState("");
-const [sending, setSending] = useState(false);
-const [messages, setMessages] = useState<ChatMessage[]>(() => getInitialMessages(null));
+  const [input, setInput] = useState("");
+  const [sending, setSending] = useState(false);
+  const [messages, setMessages] = useState<ChatMessage[]>(() => getInitialMessages(null));
+
+  const [feedbackModalOpen, setFeedbackModalOpen] = useState(false);
+  const [feedbackTarget, setFeedbackTarget] = useState<ChatMessage | null>(null);
+  const [feedbackRating, setFeedbackRating] = useState<"positive" | "negative">("positive");
+  const [feedbackComment, setFeedbackComment] = useState("");
+  const [feedbackSaving, setFeedbackSaving] = useState(false);
+  const [feedbackError, setFeedbackError] = useState<string | null>(null);
 
   const visible = useMemo(() => {
     if (!isInternalUrl(activeUrl)) return false;
@@ -214,8 +227,9 @@ const [messages, setMessages] = useState<ChatMessage[]>(() => getInitialMessages
     const raw = window.localStorage.getItem("nostur_nia_context");
 
     if (!raw) {
-      setContext(null);
-      setMessages(getInitialMessages(null));
+      const screenContext = getDefaultContextFromActiveUrl(activeUrl);
+      setContext(screenContext);
+      setMessages(getInitialMessages(screenContext));
       return;
     }
 
@@ -224,113 +238,191 @@ const [messages, setMessages] = useState<ChatMessage[]>(() => getInitialMessages
       setContext(parsed);
       setMessages(getInitialMessages(parsed));
     } catch {
-      setContext(null);
-      setMessages(getInitialMessages(null));
+      const screenContext = getDefaultContextFromActiveUrl(activeUrl);
+      setContext(screenContext);
+      setMessages(getInitialMessages(screenContext));
     }
   }
 
- function openChat() {
-  const screenContext = getDefaultContextFromActiveUrl(activeUrl);
+  function openChat() {
+    const screenContext = getDefaultContextFromActiveUrl(activeUrl);
+    const raw = window.localStorage.getItem("nostur_nia_context");
 
-  const raw = window.localStorage.getItem("nostur_nia_context");
+    if (raw) {
+      try {
+        const stored = JSON.parse(raw) as NiaContext;
 
-  if (raw) {
-    try {
-      const stored = JSON.parse(raw) as NiaContext;
+        const storedHasConversation = Boolean(getNiaConversationId(stored));
+        const isStillLiveNos =
+          activeUrl.includes("livenos") || activeUrl.includes("comunicaciones");
 
-      const storedHasConversation = Boolean(getNiaConversationId(stored));
-      const isStillLiveNos =
-        activeUrl.includes("livenos") || activeUrl.includes("comunicaciones");
-
-      if (storedHasConversation && isStillLiveNos) {
-        setContext(stored);
-        setMessages(getInitialMessages(stored));
-        setOpen(true);
-        return;
+        if (storedHasConversation && isStillLiveNos) {
+          setContext(stored);
+          setMessages(getInitialMessages(stored));
+          setOpen(true);
+          return;
+        }
+      } catch {
+        // Si el contexto guardado está roto, seguimos con contexto de pantalla.
       }
-    } catch {
-      // Si el contexto guardado está roto, seguimos con contexto de pantalla.
     }
-  }
 
-  setContext(screenContext);
-  setMessages(getInitialMessages(screenContext));
-  setOpen(true);
-}
+    setContext(screenContext);
+    setMessages(getInitialMessages(screenContext));
+    setOpen(true);
+  }
 
   function closeChat() {
     setOpen(false);
   }
 
- async function handleSend() {
-  const clean = input.trim();
+  function handleNiaContextUpdated(event: Event) {
+    const customEvent = event as CustomEvent<NiaContext | undefined>;
 
-  if (!clean || sending) return;
+    if (customEvent.detail) {
+      setContext(customEvent.detail);
 
-let activeContext = context || getDefaultContextFromActiveUrl(activeUrl);
-
-try {
-  const rawContext = window.localStorage.getItem("nostur_nia_context");
-  const isLiveNosScreen =
-    activeUrl.includes("livenos") || activeUrl.includes("comunicaciones");
-
-  if (rawContext && isLiveNosScreen) {
-    const parsedContext = JSON.parse(rawContext) as NiaContext;
-
-    if (getNiaConversationId(parsedContext)) {
-      activeContext = parsedContext;
-      setContext(parsedContext);
+      if (open) {
+        setMessages(getInitialMessages(customEvent.detail));
+      }
     }
   }
-} catch {
-  activeContext = context || getDefaultContextFromActiveUrl(activeUrl);
-}
-  const userMessage: ChatMessage = {
-    id: crypto.randomUUID(),
-    direction: "user",
-    text: clean
-  };
 
-  setMessages((current) => [...current, userMessage]);
-  setInput("");
-  setSending(true);
+  function openFeedbackModal(message: ChatMessage, rating: "positive" | "negative") {
+    if (!message.audit_id) {
+      setFeedbackError("Esta respuesta todavía no tiene auditoría vinculada.");
+      return;
+    }
 
-  try {
-    const { data, error } = await supabase.functions.invoke("nia-chat", {
-      body: {
-        message: clean,
-        context: activeContext,
-        conversation_id: getNiaConversationId(activeContext),
-        conversacion_id: getNiaConversationId(activeContext),
-        source: "nia_floating_widget"
-      }
-    });
-
-    const assistantMessage: ChatMessage = {
-      id: crypto.randomUUID(),
-      direction: "assistant",
-      text:
-        error?.message ||
-        data?.text ||
-        data?.error ||
-        "NIA no pudo responder en este momento.",
-      tool: data?.tool || (getNiaConversationId(activeContext) ? "nia_livenos_context" : "nia_chat")
-    };
-
-    setMessages((current) => [...current, assistantMessage]);
-  } catch (err) {
-    const assistantMessage: ChatMessage = {
-      id: crypto.randomUUID(),
-      direction: "assistant",
-      text: err instanceof Error ? err.message : "No se pudo conectar con NIA.",
-      tool: "nia_error"
-    };
-
-    setMessages((current) => [...current, assistantMessage]);
-  } finally {
-    setSending(false);
+    setFeedbackTarget(message);
+    setFeedbackRating(rating);
+    setFeedbackComment("");
+    setFeedbackError(null);
+    setFeedbackModalOpen(true);
   }
-}
+
+  function closeFeedbackModal() {
+    if (feedbackSaving) return;
+
+    setFeedbackModalOpen(false);
+    setFeedbackTarget(null);
+    setFeedbackComment("");
+    setFeedbackError(null);
+  }
+
+  async function saveFeedback() {
+    if (!feedbackTarget?.audit_id) {
+      setFeedbackError("No se encontró la auditoría de esta respuesta.");
+      return;
+    }
+
+    setFeedbackSaving(true);
+    setFeedbackError(null);
+
+    const { error } = await supabase
+      .from("nia_interacciones")
+      .update({
+        feedback_rating: feedbackRating,
+        feedback_comment: feedbackComment.trim() || null,
+        feedback_created_at: new Date().toISOString()
+      })
+      .eq("id", feedbackTarget.audit_id);
+
+    if (error) {
+      setFeedbackError(error.message || "No se pudo guardar el feedback.");
+      setFeedbackSaving(false);
+      return;
+    }
+
+    setMessages((current) =>
+      current.map((message) =>
+        message.id === feedbackTarget.id
+          ? {
+              ...message,
+              feedback_rating: feedbackRating
+            }
+          : message
+      )
+    );
+
+    setFeedbackSaving(false);
+    closeFeedbackModal();
+  }
+
+  async function handleSend() {
+    const clean = input.trim();
+
+    if (!clean || sending) return;
+
+    let activeContext = context || getDefaultContextFromActiveUrl(activeUrl);
+
+    try {
+      const rawContext = window.localStorage.getItem("nostur_nia_context");
+      const isLiveNosScreen =
+        activeUrl.includes("livenos") || activeUrl.includes("comunicaciones");
+
+      if (rawContext && isLiveNosScreen) {
+        const parsedContext = JSON.parse(rawContext) as NiaContext;
+
+        if (getNiaConversationId(parsedContext)) {
+          activeContext = parsedContext;
+          setContext(parsedContext);
+        }
+      }
+    } catch {
+      activeContext = context || getDefaultContextFromActiveUrl(activeUrl);
+    }
+
+    const userMessage: ChatMessage = {
+      id: crypto.randomUUID(),
+      direction: "user",
+      text: clean
+    };
+
+    setMessages((current) => [...current, userMessage]);
+    setInput("");
+    setSending(true);
+
+    try {
+      const { data, error } = await supabase.functions.invoke("nia-chat", {
+        body: {
+          message: clean,
+          context: activeContext,
+          conversation_id: getNiaConversationId(activeContext),
+          conversacion_id: getNiaConversationId(activeContext),
+          source: "nia_floating_widget"
+        }
+      });
+
+      const assistantMessage: ChatMessage = {
+        id: crypto.randomUUID(),
+        direction: "assistant",
+        text:
+          error?.message ||
+          data?.text ||
+          data?.error ||
+          "NIA no pudo responder en este momento.",
+        tool: data?.tool || (getNiaConversationId(activeContext) ? "nia_livenos_context" : "nia_chat"),
+        audit_id: data?.audit_id || null,
+        feedback_rating: null
+      };
+
+      setMessages((current) => [...current, assistantMessage]);
+    } catch (err) {
+      const assistantMessage: ChatMessage = {
+        id: crypto.randomUUID(),
+        direction: "assistant",
+        text: err instanceof Error ? err.message : "No se pudo conectar con NIA.",
+        tool: "nia_error",
+        audit_id: null,
+        feedback_rating: null
+      };
+
+      setMessages((current) => [...current, assistantMessage]);
+    } finally {
+      setSending(false);
+    }
+  }
 
   useEffect(() => {
     function handleOpenNiaChat(event: Event) {
@@ -345,21 +437,14 @@ try {
     }
 
     window.addEventListener("nostur:open-nia-chat", handleOpenNiaChat);
+    window.addEventListener("nostur:nia-context-updated", handleNiaContextUpdated);
 
     return () => {
-window.removeEventListener("nostur:open-nia-chat", handleOpenNiaChat);
-window.removeEventListener("nostur:nia-context-updated", handleNiaContextUpdated);
-      window.addEventListener("nostur:open-nia-chat", handleOpenNiaChat);
-window.addEventListener("nostur:nia-context-updated", handleNiaContextUpdated);
+      window.removeEventListener("nostur:open-nia-chat", handleOpenNiaChat);
+      window.removeEventListener("nostur:nia-context-updated", handleNiaContextUpdated);
     };
-  }, []);
-function handleNiaContextUpdated(event: Event) {
-  const customEvent = event as CustomEvent<NiaContext | undefined>;
+  }, [activeUrl, open]);
 
-  if (customEvent.detail) {
-    setContext(customEvent.detail);
-  }
-}
   if (!visible) return null;
 
   return (
@@ -427,34 +512,40 @@ function handleNiaContextUpdated(event: Event) {
                 ✨ Pedile a NIA un resumen de tus oportunidades
               </div>
 
-       {context ? (
-  <div className="mt-2 rounded-2xl border border-purple-100 bg-purple-50 px-3 py-2 text-xs font-bold text-[#5b21b6]">
-    {getNiaConversationId(context) ? (
-      <>
-        <div className="font-black">
-          Contexto activo: {getNiaPassengerName(context)}
-        </div>
+              {context ? (
+                <div className="mt-2 rounded-2xl border border-purple-100 bg-purple-50 px-3 py-2 text-xs font-bold text-[#5b21b6]">
+                  {getNiaConversationId(context) ? (
+                    <>
+                      <div className="font-black">
+                        Contexto activo: {getNiaPassengerName(context)}
+                      </div>
 
-        <div className="mt-1 text-[11px] leading-relaxed text-[#6d28d9]">
-          WhatsApp: {context?.wa_phone || "—"} · Score:{" "}
-          {context?.oportunidad_score ?? "—"} · CANDE:{" "}
-          {context?.cande_activa ? "activa" : "pausada"} · 24h:{" "}
-          {context?.ventana_24h_abierta ? "abierta" : "cerrada"}
-        </div>
-      </>
-    ) : (
-      <>
-        <div className="font-black">
-          Contexto activo: {context.module || "general"}
-        </div>
+                      <div className="mt-1 text-[11px] leading-relaxed text-[#6d28d9]">
+                        WhatsApp: {context?.wa_phone || "—"} · Score:{" "}
+                        {context?.oportunidad_score ?? "—"} · CANDE:{" "}
+                        {context?.cande_activa ? "activa" : "pausada"} · 24h:{" "}
+                        {context?.ventana_24h_abierta ? "abierta" : "cerrada"}
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="font-black">
+                        Contexto activo: {context.module || "general"}
+                      </div>
 
-        <div className="mt-1 text-[11px] leading-relaxed text-[#6d28d9]">
-          NIA está parada en esta pantalla, sin conversación puntual seleccionada.
-        </div>
-      </>
-    )}
-  </div>
-) : null}
+                      <div className="mt-1 text-[11px] leading-relaxed text-[#6d28d9]">
+                        NIA está parada en esta pantalla, sin conversación puntual seleccionada.
+                      </div>
+                    </>
+                  )}
+                </div>
+              ) : null}
+
+              {feedbackError && !feedbackModalOpen ? (
+                <div className="mt-2 rounded-2xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-bold text-red-700">
+                  {feedbackError}
+                </div>
+              ) : null}
             </div>
 
             <div className="min-h-0 flex-1 space-y-3 overflow-auto bg-[#fafafa] px-4 py-4">
@@ -484,8 +575,35 @@ function handleNiaContextUpdated(event: Event) {
                           )}
 
                           <span className="flex gap-1 text-[#94a3b8]">
-                            <ThumbsUp size={13} />
-                            <ThumbsDown size={13} />
+                            <button
+                              type="button"
+                              onClick={() => openFeedbackModal(message, "positive")}
+                              disabled={!message.audit_id}
+                              className={[
+                                "rounded-lg p-1 transition hover:bg-emerald-50 hover:text-emerald-600 disabled:cursor-not-allowed disabled:opacity-40",
+                                message.feedback_rating === "positive"
+                                  ? "bg-emerald-50 text-emerald-600"
+                                  : ""
+                              ].join(" ")}
+                              title="Buen resultado"
+                            >
+                              <ThumbsUp size={13} />
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => openFeedbackModal(message, "negative")}
+                              disabled={!message.audit_id}
+                              className={[
+                                "rounded-lg p-1 transition hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-40",
+                                message.feedback_rating === "negative"
+                                  ? "bg-red-50 text-red-600"
+                                  : ""
+                              ].join(" ")}
+                              title="Mal resultado"
+                            >
+                              <ThumbsDown size={13} />
+                            </button>
                           </span>
                         </div>
                       ) : null}
@@ -511,7 +629,7 @@ function handleNiaContextUpdated(event: Event) {
                   onKeyDown={(event) => {
                     if (event.key === "Enter" && !event.shiftKey) {
                       event.preventDefault();
-                      handleSend();
+                      void handleSend();
                     }
                   }}
                   rows={1}
@@ -522,19 +640,104 @@ function handleNiaContextUpdated(event: Event) {
                 <button
                   type="button"
                   onClick={handleSend}
-disabled={!input.trim() || sending}
+                  disabled={!input.trim() || sending}
                   className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-[#8b2cff] text-white shadow-sm transition hover:bg-[#7c3aed] disabled:opacity-50"
                   title="Enviar"
                 >
-                {sending ? (
-  <Sparkles size={17} className="animate-pulse" />
-) : (
-  <Send size={17} />
-)}
+                  {sending ? (
+                    <Sparkles size={17} className="animate-pulse" />
+                  ) : (
+                    <Send size={17} />
+                  )}
                 </button>
               </div>
             </footer>
           </aside>
+        </div>
+      ) : null}
+
+      {feedbackModalOpen ? (
+        <div className="nostur-no-drag fixed inset-0 z-[1000] flex items-center justify-center bg-[#0f172a]/45 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-[460px] overflow-hidden rounded-[28px] bg-white shadow-2xl ring-1 ring-black/10">
+            <div className="border-b border-black/10 px-5 py-4">
+              <div className="text-base font-black text-[#142033]">
+                Feedback para NIA
+              </div>
+
+              <div className="mt-1 text-xs font-bold text-[#64748b]">
+                Esto ayuda a mejorar las respuestas y queda guardado en auditoría.
+              </div>
+            </div>
+
+            <div className="p-5">
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setFeedbackRating("positive")}
+                  className={[
+                    "flex h-11 items-center justify-center gap-2 rounded-2xl text-xs font-black ring-1 ring-black/10",
+                    feedbackRating === "positive"
+                      ? "bg-emerald-50 text-emerald-700 ring-emerald-200"
+                      : "bg-white text-[#64748b] hover:bg-[#f8fafc]"
+                  ].join(" ")}
+                >
+                  <ThumbsUp size={15} />
+                  Buena respuesta
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setFeedbackRating("negative")}
+                  className={[
+                    "flex h-11 items-center justify-center gap-2 rounded-2xl text-xs font-black ring-1 ring-black/10",
+                    feedbackRating === "negative"
+                      ? "bg-red-50 text-red-700 ring-red-200"
+                      : "bg-white text-[#64748b] hover:bg-[#f8fafc]"
+                  ].join(" ")}
+                >
+                  <ThumbsDown size={15} />
+                  Mala respuesta
+                </button>
+              </div>
+
+              <textarea
+                value={feedbackComment}
+                onChange={(event) => setFeedbackComment(event.target.value)}
+                placeholder={
+                  feedbackRating === "positive"
+                    ? "Opcional: ¿qué estuvo bien?"
+                    : "Opcional: ¿qué debería mejorar NIA?"
+                }
+                className="mt-4 min-h-[110px] w-full resize-none rounded-2xl border border-black/10 bg-[#f8fafc] px-3 py-3 text-sm font-semibold text-[#142033] outline-none placeholder:text-[#94a3b8] focus:border-[#8b2cff]"
+              />
+
+              {feedbackError ? (
+                <div className="mt-3 rounded-2xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-bold text-red-700">
+                  {feedbackError}
+                </div>
+              ) : null}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-black/10 bg-[#f8fafc] px-5 py-4">
+              <button
+                type="button"
+                onClick={closeFeedbackModal}
+                disabled={feedbackSaving}
+                className="h-10 rounded-2xl bg-white px-4 text-xs font-black text-[#64748b] ring-1 ring-black/10 hover:bg-[#f1f5f9] disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+
+              <button
+                type="button"
+                onClick={saveFeedback}
+                disabled={feedbackSaving}
+                className="h-10 rounded-2xl bg-[#8b2cff] px-4 text-xs font-black text-white hover:bg-[#7c3aed] disabled:opacity-50"
+              >
+                {feedbackSaving ? "Guardando..." : "Guardar feedback"}
+              </button>
+            </div>
+          </div>
         </div>
       ) : null}
     </>
