@@ -7,10 +7,42 @@ type NiaFloatingWidgetProps = {
 
 type NiaContext = {
   source?: string;
+  module?: string;
+  action?: string;
+
   conversation_id?: string;
+  conversacion_id?: string;
+
   wa_phone?: string;
+  contacto_id?: string;
   contacto?: string;
+  contacto_nombre?: string;
+  contacto_profile_name?: string | null;
+
+  vendedor_id?: string | null;
+  vendedor_nombre?: string | null;
+
+  estado_gestion?: string | null;
+  estado_comercial?: string | null;
+  inbox?: string | null;
+  status?: string | null;
+
+  last_message_at?: string | null;
+  last_inbound_message_at?: string | null;
+  last_outbound_message_at?: string | null;
+  last_message_preview?: string | null;
+
+  ventana_24h_abierta?: boolean;
+  whatsapp_24h_expires_at?: string | null;
+
   oportunidad_id?: string | null;
+  oportunidad_score?: number | null;
+  oportunidad_estado_id?: string | null;
+  oportunidad_datos?: Record<string, unknown> | null;
+
+  cande_activa?: boolean;
+  cande_handoff_requested_at?: string | null;
+
   created_at?: string;
 };
 
@@ -25,13 +57,65 @@ function isInternalUrl(activeUrl: string): boolean {
   return activeUrl.startsWith("internal://");
 }
 
+function getNiaConversationId(context: NiaContext | null): string | null {
+  return context?.conversation_id || context?.conversacion_id || null;
+}
+
+function getNiaPassengerName(context: NiaContext | null): string {
+  return (
+    context?.contacto_nombre ||
+    context?.contacto ||
+    context?.contacto_profile_name ||
+    context?.wa_phone ||
+    "conversación de LiveNos"
+  );
+}
+
+function formatContextValue(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "—";
+
+  if (typeof value === "boolean") return value ? "Sí" : "No";
+
+  if (typeof value === "object") {
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch {
+      return String(value);
+    }
+  }
+
+  return String(value);
+}
+
+function buildNiaContextSummary(context: NiaContext | null): string {
+  if (!getNiaConversationId(context)) {
+    return "NIA abierta sin conversación seleccionada.";
+  }
+
+  return [
+    `Pasajero: ${getNiaPassengerName(context)}`,
+    `WhatsApp: ${formatContextValue(context?.wa_phone)}`,
+    `Vendedor: ${formatContextValue(context?.vendedor_nombre)}`,
+    `Estado gestión: ${formatContextValue(context?.estado_gestion)}`,
+    `Estado comercial: ${formatContextValue(context?.estado_comercial)}`,
+    `Último mensaje: ${formatContextValue(context?.last_message_preview)}`,
+    `Ventana 24h abierta: ${formatContextValue(context?.ventana_24h_abierta)}`,
+    `Score oportunidad: ${formatContextValue(context?.oportunidad_score)}`,
+    `Cande activa: ${formatContextValue(context?.cande_activa)}`,
+    `Datos oportunidad: ${formatContextValue(context?.oportunidad_datos)}`
+  ].join("\n");
+}
+
 function getInitialMessages(context: NiaContext | null): ChatMessage[] {
-  if (context?.conversation_id) {
+  if (getNiaConversationId(context)) {
     return [
       {
         id: crypto.randomUUID(),
         direction: "assistant",
-        text: `Estoy viendo el contexto de LiveNos.\n\nPasajero: ${context.contacto || "—"}\nWhatsApp: ${context.wa_phone || "—"}\n\nPedime un resumen, una acción o una recomendación sobre esta conversación.`
+        text: `Estoy viendo el contexto real de LiveNos.\n\n${buildNiaContextSummary(
+          context
+        )}\n\nPodés pedirme, por ejemplo:\n• Resumí esta conversación.\n• Decime qué debería responder el vendedor.\n• Detectá si está caliente o fría.\n• Decime si conviene activar, pausar o derivar CANDE.`,
+        tool: "contexto_livenos"
       }
     ];
   }
@@ -95,14 +179,18 @@ export function NiaFloatingWidget({ activeUrl }: NiaFloatingWidgetProps) {
       text: clean
     };
 
-    const assistantMessage: ChatMessage = {
-      id: crypto.randomUUID(),
-      direction: "assistant",
-      text: context?.conversation_id
-        ? `Recibido. En la próxima fase voy a ejecutar esto contra la conversación ${context.contacto || context.wa_phone || ""}.\n\nPor ahora dejé preparado el chat contextual de NIA.`
-        : "Recibido. En la próxima fase conectamos este chat con la función real de NIA para leer datos y ejecutar acciones.",
-      tool: context?.conversation_id ? "contexto_livenos" : "chat_nia"
-    };
+  const hasConversationContext = Boolean(getNiaConversationId(context));
+
+const assistantMessage: ChatMessage = {
+  id: crypto.randomUUID(),
+  direction: "assistant",
+  text: hasConversationContext
+    ? `Recibido. Voy a trabajar sobre este contexto de LiveNos:\n\n${buildNiaContextSummary(
+        context
+      )}\n\nPedido del vendedor:\n"${clean}"\n\nEn el próximo paso conectamos este chat a la función real de NIA para que pueda leer mensajes completos, resumir, sugerir respuesta y ejecutar acciones internas.`
+    : `Recibido.\n\nPedido:\n"${clean}"\n\nEn el próximo paso conectamos este chat con la función real de NIA para leer datos del sistema y ejecutar acciones internas.`,
+  tool: hasConversationContext ? "contexto_livenos" : "chat_nia"
+};
 
     setMessages((current) => [...current, userMessage, assistantMessage]);
     setInput("");
@@ -194,11 +282,20 @@ export function NiaFloatingWidget({ activeUrl }: NiaFloatingWidgetProps) {
                 ✨ Pedile a NIA un resumen de tus oportunidades
               </div>
 
-              {context?.conversation_id ? (
-                <div className="mt-2 rounded-2xl border border-purple-100 bg-purple-50 px-3 py-2 text-xs font-bold text-[#5b21b6]">
-                  Contexto: {context.contacto || context.wa_phone || "conversación de LiveNos"}
-                </div>
-              ) : null}
+            {getNiaConversationId(context) ? (
+  <div className="mt-2 rounded-2xl border border-purple-100 bg-purple-50 px-3 py-2 text-xs font-bold text-[#5b21b6]">
+    <div className="font-black">
+      Contexto activo: {getNiaPassengerName(context)}
+    </div>
+
+    <div className="mt-1 text-[11px] leading-relaxed text-[#6d28d9]">
+      WhatsApp: {context?.wa_phone || "—"} · Score:{" "}
+      {context?.oportunidad_score ?? "—"} · CANDE:{" "}
+      {context?.cande_activa ? "activa" : "pausada"} · 24h:{" "}
+      {context?.ventana_24h_abierta ? "abierta" : "cerrada"}
+    </div>
+  </div>
+) : null}
             </div>
 
             <div className="min-h-0 flex-1 space-y-3 overflow-auto bg-[#fafafa] px-4 py-4">

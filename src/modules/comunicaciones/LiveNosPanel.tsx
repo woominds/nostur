@@ -2006,29 +2006,70 @@ function handleMicButtonClick() {
     window.open(mediaUrl, "_blank", "noopener,noreferrer");
   }
 
-  function openNiaFromLiveNos() {
-    const detail = selectedConversation
-      ? {
-          source: "livenos",
-          conversation_id: selectedConversation.id,
-          wa_phone: selectedConversation.wa_phone,
-          contacto: getDisplayName(selectedContacto, selectedConversation),
-          oportunidad_id: selectedOportunidad?.id || null,
-          created_at: new Date().toISOString()
-        }
-      : {
-          source: "livenos",
-          created_at: new Date().toISOString()
-        };
+ function openNiaFromLiveNos() {
+  const detail = selectedConversation
+    ? {
+        source: "livenos",
+        module: "comunicaciones",
+        action: "open_nia_with_conversation_context",
 
-    window.localStorage.setItem("nostur_nia_context", JSON.stringify(detail));
+        conversation_id: selectedConversation.id,
+        conversacion_id: selectedConversation.id,
 
-    window.dispatchEvent(
-      new CustomEvent("nostur:open-nia-chat", {
-        detail
-      })
-    );
-  }
+        wa_phone: selectedConversation.wa_phone,
+        contacto_id: selectedConversation.contacto_id,
+        contacto_nombre: getDisplayName(selectedContacto, selectedConversation),
+        contacto_profile_name: selectedContacto?.profile_name || null,
+
+        vendedor_id: selectedConversation.assigned_to || null,
+        vendedor_nombre: getVendedorName(selectedVendedor),
+
+        estado_gestion: selectedConversation.estado_gestion,
+        estado_comercial: selectedConversation.estado_comercial,
+        inbox: selectedConversation.inbox,
+        status: selectedConversation.status,
+
+        last_message_at: selectedConversation.last_message_at,
+        last_inbound_message_at: selectedConversation.last_inbound_message_at,
+        last_outbound_message_at: selectedConversation.last_outbound_message_at,
+        last_message_preview: selectedConversation.last_message_preview,
+
+        ventana_24h_abierta: Boolean(
+          selectedConversation.whatsapp_24h_expires_at &&
+            new Date(selectedConversation.whatsapp_24h_expires_at).getTime() > Date.now()
+        ),
+        whatsapp_24h_expires_at: selectedConversation.whatsapp_24h_expires_at,
+
+        oportunidad_id: selectedOportunidad?.id || null,
+        oportunidad_score: selectedOportunidad?.score || null,
+        oportunidad_estado_id: selectedOportunidad?.estado_id || null,
+        oportunidad_datos: selectedOportunidad?.datos || null,
+        cande_activa: selectedOportunidad?.cande_activa || false,
+        cande_handoff_requested_at: selectedOportunidad?.cande_handoff_requested_at || null,
+
+        created_at: new Date().toISOString()
+      }
+    : {
+        source: "livenos",
+        module: "comunicaciones",
+        action: "open_nia_without_conversation",
+        created_at: new Date().toISOString()
+      };
+
+  window.localStorage.setItem("nostur_nia_context", JSON.stringify(detail));
+
+  window.dispatchEvent(
+    new CustomEvent("nostur:open-nia-chat", {
+      detail
+    })
+  );
+
+  setStatus(
+    selectedConversation
+      ? "NIA recibió el contexto de esta conversación."
+      : "NIA abierta sin conversación seleccionada."
+  );
+}
 
 
 
