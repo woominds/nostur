@@ -32,6 +32,7 @@ import {
   InboxList,
   MessageStatusIcon,
   NiaSidebarCard,
+  RightPanelTabs,
   SellersList,
   StatusPill,
   getNotaVisual
@@ -2456,31 +2457,7 @@ function handleMicButtonClick() {
     return renderInternalBubble(item.nota);
   }
 
-  function renderRightTabs() {
-    const tabs: { id: RightTab; label: string }[] = [
-      { id: "info", label: "Datos" },
-      { id: "tareas", label: "Tareas" },
-      { id: "historial", label: "Historial" }
-    ];
 
-    return (
-      <div className="grid grid-cols-3 gap-1 rounded-2xl bg-[#f1f5f9] p-1">
-        {tabs.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            onClick={() => setRightTab(tab.id)}
-            className={[
-              "rounded-xl px-2 py-2 text-[10px] font-black",
-              rightTab === tab.id ? "bg-white text-[#4f7c90] shadow-sm" : "text-[#64748b]"
-            ].join(" ")}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
-    );
-  }
 
   function renderTemplateModal() {
     if (!templateModalOpen || !selectedConversation) return null;
@@ -3647,7 +3624,7 @@ function handleMicButtonClick() {
                   </div>
 
                   <aside className="min-h-0 overflow-auto border-l border-black/10 bg-white p-4">
-                    {renderRightTabs()}
+                  <RightPanelTabs rightTab={rightTab} onChangeTab={setRightTab} />
 
                     <div className="mt-4">{renderRightPanelContent()}</div>
                   </aside>

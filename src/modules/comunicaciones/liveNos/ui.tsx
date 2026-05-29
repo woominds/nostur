@@ -6,7 +6,8 @@ import type {
   InboxKey,
   Mensaje,
   NotaConversacion,
-  ProfileLite
+  ProfileLite,
+  RightTab
 } from "./types";
 import { INBOXES } from "./constants";
 import {
@@ -424,5 +425,37 @@ export function ConversationsColumn({
         )}
       </div>
     </section>
+  );
+}
+
+export function RightPanelTabs({
+  rightTab,
+  onChangeTab
+}: {
+  rightTab: RightTab;
+  onChangeTab: (tab: RightTab) => void;
+}) {
+  const tabs: { id: RightTab; label: string }[] = [
+    { id: "info", label: "Datos" },
+    { id: "tareas", label: "Tareas" },
+    { id: "historial", label: "Historial" }
+  ];
+
+  return (
+    <div className="grid grid-cols-3 gap-1 rounded-2xl bg-[#f1f5f9] p-1">
+      {tabs.map((tab) => (
+        <button
+          key={tab.id}
+          type="button"
+          onClick={() => onChangeTab(tab.id)}
+          className={[
+            "rounded-xl px-2 py-2 text-[10px] font-black",
+            rightTab === tab.id ? "bg-white text-[#4f7c90] shadow-sm" : "text-[#64748b]"
+          ].join(" ")}
+        >
+          {tab.label}
+        </button>
+      ))}
+    </div>
   );
 }
