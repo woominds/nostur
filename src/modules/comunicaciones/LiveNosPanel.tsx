@@ -28,6 +28,7 @@ import { EmptyState, Pill } from "./comunicacionesShared";
 import { EMOJI_GROUPS, INBOXES, QUICK_EMOJIS } from "./liveNos/constants";
 import {
   ComposerIconButton,
+  ConversationCard,
   HeaderButton,
   MessageStatusIcon,
   StatusPill,
@@ -72,7 +73,6 @@ import {
   getWindowRemainingLabel,
   isAudioMessage,
   isImageMessage,
-  isWindowOpen,
   normalizePhoneForLiveNos,
   normalizePhoneWithPlus
 } from "./liveNos/helpers";
@@ -2029,59 +2029,7 @@ function handleMicButtonClick() {
     );
   }
 
-  function renderConversationCard(conv: ConversationVM) {
-    const name = getDisplayName(conv.contacto, conv);
-    const active = conv.id === selectedId;
-    const vendedor = getVendedorName(conv.vendedor);
-    const score = conv.oportunidad?.score || 0;
 
-    return (
-      <button
-        key={conv.id}
-        type="button"
-        onClick={() => selectConversation(conv.id)}
-        className={[
-          "w-full rounded-[22px] border p-3 text-left transition",
-          active
-            ? "border-[#4f7c90] bg-[#eef6f7] shadow-sm"
-            : "border-black/10 bg-white hover:border-[#4f7c90]/40 hover:bg-[#f8fbfc]"
-        ].join(" ")}
-      >
-        <div className="flex items-start gap-3">
-          <div className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-[#4f7c90] text-xs font-black text-white">
-            {getInitials(name)}
-
-            {conv.unread_count > 0 ? (
-              <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-[#ff2f76] px-1 text-[10px] font-black text-white">
-                {conv.unread_count > 9 ? "9+" : conv.unread_count}
-              </span>
-            ) : null}
-          </div>
-
-          <div className="min-w-0 flex-1">
-            <div className="flex items-start justify-between gap-2">
-              <div className="truncate text-sm font-black text-[#142033]">{name}</div>
-
-              <div className="shrink-0 text-[10px] font-bold text-[#94a3b8]">
-                {formatDateTime(conv.last_message_at || conv.updated_at)}
-              </div>
-            </div>
-
-            <div className="mt-1 line-clamp-2 text-xs font-bold leading-snug text-[#64748b]">
-              {conv.last_message_preview || "Sin mensajes todavía"}
-            </div>
-
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              <StatusPill conv={conv} />
-              <Pill>{vendedor}</Pill>
-              {score > 0 ? <Pill>Score {score}</Pill> : null}
-              {isWindowOpen(conv) ? <Pill>24h abierta</Pill> : <Pill>24h cerrada</Pill>}
-            </div>
-          </div>
-        </div>
-      </button>
-    );
-  }
 
   function renderMessageMenu(message: Mensaje) {
     const mediaUrl = getMessageMediaUrl(message);
@@ -3236,8 +3184,14 @@ function handleMicButtonClick() {
                   subtitle="Cuando ingresen mensajes por WhatsApp aparecerán en esta bandeja."
                 />
               ) : (
-                filteredConversations.map((conv) => renderConversationCard(conv))
-              )}
+filteredConversations.map((conv) => (
+  <ConversationCard
+    key={conv.id}
+    conv={conv}
+    selectedId={selectedId}
+    onSelect={selectConversation}
+  />
+))              )}
             </div>
           </section>
 
