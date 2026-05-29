@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Bot, Mic, Send, Sparkles, ThumbsDown, ThumbsUp, X } from "lucide-react";
 import { supabase } from "../lib/supabase";
 
@@ -218,29 +218,63 @@ export function NiaFloatingWidget({ activeUrl }: NiaFloatingWidgetProps) {
   const [feedbackSaving, setFeedbackSaving] = useState(false);
   const [feedbackError, setFeedbackError] = useState<string | null>(null);
 
+  const openRef = useRef(false);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
   const visible = useMemo(() => {
     if (!isInternalUrl(activeUrl)) return false;
     return true;
   }, [activeUrl]);
 
-  function readContextFromStorage() {
+  useEffect(() => {
+    openRef.current = open;
+  }, [open]);
+
+  function scrollNiaToBottom(behavior: ScrollBehavior = "smooth") {
+    window.requestAnimationFrame(() => {
+      window.setTimeout(() => {
+        messagesEndRef.current?.scrollIntoView({
+          behavior,
+          block: "end"
+        });
+      }, 50);
+    });
+  }
+
+  useEffect(() => {
+    if (!open) return;
+
+    scrollNiaToBottom("smooth");
+  }, [messages.length, sending, open]);
+
+  function readContextFromStorage(options: { resetMessages?: boolean } = {}) {
     const raw = window.localStorage.getItem("nostur_nia_context");
 
     if (!raw) {
       const screenContext = getDefaultContextFromActiveUrl(activeUrl);
       setContext(screenContext);
-      setMessages(getInitialMessages(screenContext));
+
+      if (options.resetMessages) {
+        setMessages(getInitialMessages(screenContext));
+      }
+
       return;
     }
 
     try {
       const parsed = JSON.parse(raw) as NiaContext;
       setContext(parsed);
-      setMessages(getInitialMessages(parsed));
+
+      if (options.resetMessages) {
+        setMessages(getInitialMessages(parsed));
+      }
     } catch {
       const screenContext = getDefaultContextFromActiveUrl(activeUrl);
       setContext(screenContext);
-      setMessages(getInitialMessages(screenContext));
+
+      if (options.resetMessages) {
+        setMessages(getInitialMessages(screenContext));
+      }
     }
   }
 
@@ -274,18 +308,6 @@ export function NiaFloatingWidget({ activeUrl }: NiaFloatingWidgetProps) {
 
   function closeChat() {
     setOpen(false);
-  }
-
-  function handleNiaContextUpdated(event: Event) {
-    const customEvent = event as CustomEvent<NiaContext | undefined>;
-
-    if (customEvent.detail) {
-      setContext(customEvent.detail);
-
-      if (open) {
-        setMessages(getInitialMessages(customEvent.detail));
-      }
-    }
   }
 
   function openFeedbackModal(message: ChatMessage, rating: "positive" | "negative") {
@@ -398,11 +420,17 @@ export function NiaFloatingWidget({ activeUrl }: NiaFloatingWidgetProps) {
         id: crypto.randomUUID(),
         direction: "assistant",
         text:
-          error?.message ||
           data?.text ||
           data?.error ||
+          error?.message ||
           "NIA no pudo responder en este momento.",
-        tool: data?.tool || (getNiaConversationId(activeContext) ? "nia_livenos_context" : "nia_chat"),
+        tool:
+          data?.tool ||
+          (data?.action_executed
+            ? "nia_action_livenos"
+            : getNiaConversationId(activeContext)
+              ? "nia_livenos_context"
+              : "nia_chat"),
         audit_id: data?.audit_id || null,
         feedback_rating: null
       };
@@ -430,10 +458,29 @@ export function NiaFloatingWidget({ activeUrl }: NiaFloatingWidgetProps) {
 
       if (customEvent.detail) {
         window.localStorage.setItem("nostur_nia_context", JSON.stringify(customEvent.detail));
+        setContext(customEvent.detail);
+
+        if (!openRef.current) {
+          setMessages(getInitialMessages(customEvent.detail));
+        }
+      } else if (!openRef.current) {
+        readContextFromStorage({ resetMessages: true });
       }
 
-      readContextFromStorage();
       setOpen(true);
+    }
+
+    function handleNiaContextUpdated(event: Event) {
+      const customEvent = event as CustomEvent<NiaContext | undefined>;
+
+      if (!customEvent.detail) return;
+
+      window.localStorage.setItem("nostur_nia_context", JSON.stringify(customEvent.detail));
+
+      // Importante:
+      // Actualizamos contexto, pero NO reiniciamos messages.
+      // Si reiniciamos messages, desaparecen las respuestas después de ejecutar acciones.
+      setContext(customEvent.detail);
     }
 
     window.addEventListener("nostur:open-nia-chat", handleOpenNiaChat);
@@ -443,7 +490,7 @@ export function NiaFloatingWidget({ activeUrl }: NiaFloatingWidgetProps) {
       window.removeEventListener("nostur:open-nia-chat", handleOpenNiaChat);
       window.removeEventListener("nostur:nia-context-updated", handleNiaContextUpdated);
     };
-  }, [activeUrl, open]);
+  }, [activeUrl]);
 
   if (!visible) return null;
 
@@ -611,6 +658,8 @@ export function NiaFloatingWidget({ activeUrl }: NiaFloatingWidgetProps) {
                   </div>
                 );
               })}
+
+              <div ref={messagesEndRef} />
             </div>
 
             <footer className="shrink-0 border-t border-black/10 bg-white p-3">
