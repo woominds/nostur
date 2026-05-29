@@ -459,3 +459,31 @@ export function RightPanelTabs({
     </div>
   );
 }
+
+export function LiveNosSidebar({
+  activeInbox,
+  inboxCounts,
+  profiles,
+  onChangeInbox,
+  onOpenNia
+}: {
+  activeInbox: InboxKey;
+  inboxCounts: Record<InboxKey, number>;
+  profiles: ProfileLite[];
+  onChangeInbox: (inbox: InboxKey) => void;
+  onOpenNia: () => void;
+}) {
+  return (
+    <aside className="flex min-h-0 flex-col gap-4 overflow-hidden">
+      <NiaSidebarCard onOpenNia={onOpenNia} />
+
+      <InboxList
+        activeInbox={activeInbox}
+        inboxCounts={inboxCounts}
+        onChangeInbox={onChangeInbox}
+      />
+
+      <SellersList profiles={profiles} />
+    </aside>
+  );
+}

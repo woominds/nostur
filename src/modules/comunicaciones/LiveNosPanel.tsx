@@ -29,11 +29,9 @@ import {
   ComposerIconButton,
   ConversationsColumn,
   HeaderButton,
-  InboxList,
+  LiveNosSidebar,
   MessageStatusIcon,
-  NiaSidebarCard,
   RightPanelTabs,
-  SellersList,
   StatusPill,
   getNotaVisual
 } from "./liveNos/ui";
@@ -3043,15 +3041,13 @@ function handleMicButtonClick() {
 
       <main className="grid min-h-0 flex-1 grid-cols-[320px_410px_minmax(0,1fr)] gap-4 overflow-hidden p-4">
   <aside className="flex min-h-0 flex-col gap-4 overflow-hidden">
-   <NiaSidebarCard onOpenNia={openNiaFromLiveNos} />
-
-    <InboxList
-      activeInbox={activeInbox}
-      inboxCounts={inboxCounts}
-      onChangeInbox={setActiveInbox}
-    />
-
-    <SellersList profiles={profiles} />
+<LiveNosSidebar
+  activeInbox={activeInbox}
+  inboxCounts={inboxCounts}
+  profiles={profiles}
+  onChangeInbox={setActiveInbox}
+  onOpenNia={openNiaFromLiveNos}
+/>
   </aside>
 
 <ConversationsColumn
