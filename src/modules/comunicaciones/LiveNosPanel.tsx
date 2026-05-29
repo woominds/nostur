@@ -32,6 +32,7 @@ import {
   HeaderButton,
   InboxList,
   MessageStatusIcon,
+  NiaSidebarCard,
   SellersList,
   StatusPill,
   getNotaVisual
@@ -3066,28 +3067,7 @@ function handleMicButtonClick() {
 
       <main className="grid min-h-0 flex-1 grid-cols-[320px_410px_minmax(0,1fr)] gap-4 overflow-hidden p-4">
   <aside className="flex min-h-0 flex-col gap-4 overflow-hidden">
-    <section className="rounded-[26px] border border-black/10 bg-white/80 p-4 shadow-sm">
-      <div className="flex items-center gap-3">
-        <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-[#ff2f76] to-[#8b2cff] text-white shadow-lg shadow-purple-500/20">
-          <Sparkles size={20} />
-        </div>
-
-        <div className="min-w-0">
-          <div className="text-sm font-black text-[#142033]">NIA interno</div>
-          <div className="truncate text-xs font-bold text-[#64748b]">
-            Pedime resúmenes, acciones o derivaciones.
-          </div>
-        </div>
-      </div>
-
-      <button
-        type="button"
-        onClick={openNiaFromLiveNos}
-        className="mt-3 h-10 w-full rounded-2xl bg-[#7c3aed] text-xs font-black text-white shadow-sm hover:bg-[#6d28d9]"
-      >
-        Abrir NIA
-      </button>
-    </section>
+   <NiaSidebarCard onOpenNia={openNiaFromLiveNos} />
 
     <InboxList
       activeInbox={activeInbox}
