@@ -529,6 +529,59 @@ async function callOpenAI(params: {
     };
   }
 
+  async function transcribeAudioWithOpenAI(params: {
+  audioBase64: string;
+  mimeType: string;
+  filename?: string | null;
+}) {
+  const apiKey = Deno.env.get("OPENAI_API_KEY");
+
+  if (!apiKey) {
+    throw new Error("No hay OPENAI_API_KEY configurada para transcribir audio.");
+  }
+
+  const cleanBase64 = cleanText(params.audioBase64).replace(/^data:audio\/[a-zA-Z0-9.+-]+;base64,/, "");
+
+  if (!cleanBase64) {
+    throw new Error("El audio llegó vacío.");
+  }
+
+  const binary = Uint8Array.from(atob(cleanBase64), (char) => char.charCodeAt(0));
+  const mimeType = cleanText(params.mimeType) || "audio/webm";
+  const filename = cleanText(params.filename) || "nia-audio.webm";
+
+  const blob = new Blob([binary], {
+    type: mimeType
+  });
+
+  const formData = new FormData();
+  formData.append("file", blob, filename);
+  formData.append("model", Deno.env.get("NIA_TRANSCRIPTION_MODEL") || "gpt-4o-mini-transcribe");
+  formData.append("language", "es");
+
+  const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`
+    },
+    body: formData
+  });
+
+  const data = await response.json();
+
+  if (!response.ok || data.error) {
+    throw new Error(data?.error?.message || `OpenAI rechazó la transcripción. HTTP ${response.status}`);
+  }
+
+  const text = cleanText(data.text);
+
+  if (!text) {
+    throw new Error("No pude transcribir el audio.");
+  }
+
+  return text;
+}
+
   const model = Deno.env.get("NIA_OPENAI_MODEL") || "gpt-4.1-mini";
 
   const response = await fetch("https://api.openai.com/v1/responses", {
@@ -1588,13 +1641,23 @@ serve(async (req) => {
   if (req.method !== "POST") return jsonResponse({ ok: false, error: "Method not allowed" }, 405);
 
   try {
-    payload = await req.json();
+   payload = await req.json();
 
-    const userMessage = cleanText(payload.message || payload.text);
+let transcribedText: string | null = null;
 
-    if (!userMessage) {
-      return jsonResponse({ ok: false, error: "El mensaje está vacío." }, 400);
-    }
+if (payload.audio_base64) {
+  transcribedText = await transcribeAudioWithOpenAI({
+    audioBase64: payload.audio_base64,
+    mimeType: payload.audio_mime_type || payload.mime_type || "audio/webm",
+    filename: payload.audio_filename || "nia-audio.webm"
+  });
+}
+
+const userMessage = cleanText(payload.message || payload.text || transcribedText);
+
+if (!userMessage) {
+  return jsonResponse({ ok: false, error: "El mensaje está vacío." }, 200);
+}
 
     const supabase = getSupabaseAdmin();
     const userId = await getAuthUserId(req);
@@ -1644,7 +1707,8 @@ return jsonResponse(
     used_openai: false,
     action_executed: actionResponse.executed,
     action_result: actionResponse.action_result,
-    error: actionResponse.ok ? null : actionResponse.text
+    error: actionResponse.ok ? null : actionResponse.text,
+    transcribed_text: transcribedText
   },
   200
 );
@@ -1697,24 +1761,25 @@ return jsonResponse(
       generalContext
     });
 
-    return jsonResponse({
-      ok: true,
-      text: finalText,
-      tool,
-      conversation_id: conversationId,
-      user_id: userId,
-      audit_id: auditId,
-      used_openai: ai.ok,
-      general_context: generalContext
-        ? {
-            open_conversations_count: generalContext.open_conversations_count,
-            unattended_conversations_count: generalContext.unattended_conversations_count,
-            opportunities_count: generalContext.opportunities_count,
-            training_negative_count: generalContext.recent_negative_feedback?.length || 0,
-            training_positive_count: generalContext.recent_positive_feedback?.length || 0
-          }
-        : null
-    });
+  return jsonResponse({
+  ok: true,
+  text: finalText,
+  tool,
+  conversation_id: conversationId,
+  user_id: userId,
+  audit_id: auditId,
+  used_openai: ai.ok,
+  transcribed_text: transcribedText,
+  general_context: generalContext
+    ? {
+        open_conversations_count: generalContext.open_conversations_count,
+        unattended_conversations_count: generalContext.unattended_conversations_count,
+        opportunities_count: generalContext.opportunities_count,
+        training_negative_count: generalContext.recent_negative_feedback?.length || 0,
+        training_positive_count: generalContext.recent_positive_feedback?.length || 0
+      }
+    : null
+});
   } catch (error) {
     const errorMessage = getErrorMessage(error);
 

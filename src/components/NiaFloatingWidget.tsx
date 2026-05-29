@@ -141,7 +141,6 @@ function getNiaPassengerName(context: NiaContext | null): string {
 
 function formatContextValue(value: unknown): string {
   if (value === null || value === undefined || value === "") return "—";
-
   if (typeof value === "boolean") return value ? "Sí" : "No";
 
   if (typeof value === "object") {
@@ -211,6 +210,9 @@ export function NiaFloatingWidget({ activeUrl }: NiaFloatingWidgetProps) {
   const [sending, setSending] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>(() => getInitialMessages(null));
 
+  const [audioRecording, setAudioRecording] = useState(false);
+  const [audioSending, setAudioSending] = useState(false);
+
   const [feedbackModalOpen, setFeedbackModalOpen] = useState(false);
   const [feedbackTarget, setFeedbackTarget] = useState<ChatMessage | null>(null);
   const [feedbackRating, setFeedbackRating] = useState<"positive" | "negative">("positive");
@@ -220,6 +222,8 @@ export function NiaFloatingWidget({ activeUrl }: NiaFloatingWidgetProps) {
 
   const openRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const audioRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<BlobPart[]>([]);
 
   const visible = useMemo(() => {
     if (!isInternalUrl(activeUrl)) return false;
@@ -242,10 +246,19 @@ export function NiaFloatingWidget({ activeUrl }: NiaFloatingWidgetProps) {
   }
 
   useEffect(() => {
-    if (!open) return;
+    return () => {
+      const recorder = audioRecorderRef.current;
 
+      if (recorder && recorder.state !== "inactive") {
+        recorder.stop();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
     scrollNiaToBottom("smooth");
-  }, [messages.length, sending, open]);
+  }, [messages.length, sending, audioSending, open]);
 
   function readContextFromStorage(options: { resetMessages?: boolean } = {}) {
     const raw = window.localStorage.getItem("nostur_nia_context");
@@ -371,11 +384,47 @@ export function NiaFloatingWidget({ activeUrl }: NiaFloatingWidgetProps) {
     closeFeedbackModal();
   }
 
-  async function handleSend() {
-    const clean = input.trim();
+  function getNiaRecorderMimeType() {
+    const options = [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/ogg;codecs=opus",
+      "audio/ogg",
+      "audio/mp4"
+    ];
 
-    if (!clean || sending) return;
+    return options.find((type) => {
+      try {
+        return MediaRecorder.isTypeSupported(type);
+      } catch {
+        return false;
+      }
+    });
+  }
 
+  function getAudioExtension(mimeType: string) {
+    if (mimeType.includes("ogg")) return "ogg";
+    if (mimeType.includes("mp4")) return "m4a";
+    if (mimeType.includes("mpeg")) return "mp3";
+    return "webm";
+  }
+
+  function blobToBase64(blob: Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+
+      reader.onloadend = () => {
+        const result = String(reader.result || "");
+        const base64 = result.includes(",") ? result.split(",")[1] : result;
+        resolve(base64);
+      };
+
+      reader.onerror = () => reject(new Error("No se pudo leer el audio."));
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  function getActiveContextForNia() {
     let activeContext = context || getDefaultContextFromActiveUrl(activeUrl);
 
     try {
@@ -394,6 +443,32 @@ export function NiaFloatingWidget({ activeUrl }: NiaFloatingWidgetProps) {
     } catch {
       activeContext = context || getDefaultContextFromActiveUrl(activeUrl);
     }
+
+    return activeContext;
+  }
+
+  function dispatchNiaActionExecuted(data: any, source: "nia" | "nia_audio") {
+    if (!data?.action_executed) return;
+
+    window.dispatchEvent(
+      new CustomEvent("nostur:nia-action-executed", {
+        detail: {
+          source,
+          tool: data?.tool || null,
+          conversation_id: data?.conversation_id || null,
+          action_result: data?.action_result || null,
+          created_at: new Date().toISOString()
+        }
+      })
+    );
+  }
+
+  async function handleSend() {
+    const clean = input.trim();
+
+    if (!clean || sending) return;
+
+    const activeContext = getActiveContextForNia();
 
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
@@ -435,36 +510,9 @@ export function NiaFloatingWidget({ activeUrl }: NiaFloatingWidgetProps) {
         feedback_rating: null
       };
 
-setMessages((current) => [...current, assistantMessage]);
-
-if (data?.action_executed) {
-  window.dispatchEvent(
-    new CustomEvent("nostur:nia-action-executed", {
-      detail: {
-        source: "nia",
-        tool: data?.tool || null,
-        conversation_id: data?.conversation_id || null,
-        action_result: data?.action_result || null,
-        created_at: new Date().toISOString()
-      }
-    })
-  );
-}
-
-
-if (data?.action_executed) {
-  window.dispatchEvent(
-    new CustomEvent("nostur:nia-action-executed", {
-      detail: {
-        source: "nia",
-        tool: data?.tool || null,
-        conversation_id: data?.conversation_id || null,
-        action_result: data?.action_result || null,
-        created_at: new Date().toISOString()
-      }
-    })
-  );
-}    } catch (err) {
+      setMessages((current) => [...current, assistantMessage]);
+      dispatchNiaActionExecuted(data, "nia");
+    } catch (err) {
       const assistantMessage: ChatMessage = {
         id: crypto.randomUUID(),
         direction: "assistant",
@@ -478,6 +526,231 @@ if (data?.action_executed) {
     } finally {
       setSending(false);
     }
+  }
+
+  async function sendAudioToNia(audioBlob: Blob, mimeType: string) {
+  if (sending || audioSending) return;
+
+  const activeContext = getActiveContextForNia();
+  const tempUserMessageId = crypto.randomUUID();
+
+  const userMessage: ChatMessage = {
+    id: tempUserMessageId,
+    direction: "user",
+    text: "🎙️ Audio recibido. Transcribiendo..."
+  };
+
+  setMessages((current) => [...current, userMessage]);
+  setAudioSending(true);
+  setSending(true);
+
+  try {
+    const audioBase64 = await blobToBase64(audioBlob);
+    const extension = getAudioExtension(mimeType);
+
+    const { data: transcribeData, error: transcribeError } = await supabase.functions.invoke(
+      "nia-transcribe-audio",
+      {
+        body: {
+          audio_base64: audioBase64,
+          audio_mime_type: mimeType,
+          audio_filename: `nia-audio-${Date.now()}.${extension}`
+        }
+      }
+    );
+
+    if (transcribeError || !transcribeData?.ok) {
+      const errorMessage =
+        transcribeError?.message ||
+        transcribeData?.error ||
+        "No pude transcribir el audio.";
+
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === tempUserMessageId
+            ? {
+                ...message,
+                text: `🎙️ Audio recibido, pero no pude transcribirlo.\n\n${errorMessage}`
+              }
+            : message
+        )
+      );
+
+      const assistantMessage: ChatMessage = {
+        id: crypto.randomUUID(),
+        direction: "assistant",
+        text: errorMessage,
+        tool: "nia_audio_transcription_error",
+        audit_id: null,
+        feedback_rating: null
+      };
+
+      setMessages((current) => [...current, assistantMessage]);
+      return;
+    }
+
+    const transcribedText = String(transcribeData.transcribed_text || transcribeData.text || "").trim();
+
+    if (!transcribedText) {
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === tempUserMessageId
+            ? {
+                ...message,
+                text: "🎙️ Audio recibido, pero la transcripción vino vacía."
+              }
+            : message
+        )
+      );
+
+      return;
+    }
+
+    setMessages((current) =>
+      current.map((message) =>
+        message.id === tempUserMessageId
+          ? {
+              ...message,
+              text: `🎙️ ${transcribedText}`
+            }
+          : message
+      )
+    );
+
+    const { data, error } = await supabase.functions.invoke("nia-chat", {
+      body: {
+        message: transcribedText,
+        text: transcribedText,
+        context: activeContext,
+        conversation_id: getNiaConversationId(activeContext),
+        conversacion_id: getNiaConversationId(activeContext),
+        source: "nia_floating_widget_audio"
+      }
+    });
+
+    const assistantMessage: ChatMessage = {
+      id: crypto.randomUUID(),
+      direction: "assistant",
+      text:
+        data?.text ||
+        data?.error ||
+        error?.message ||
+        "NIA no pudo responder en este momento.",
+      tool:
+        data?.tool ||
+        (data?.action_executed
+          ? "nia_action_livenos"
+          : getNiaConversationId(activeContext)
+            ? "nia_livenos_context"
+            : "nia_chat"),
+      audit_id: data?.audit_id || null,
+      feedback_rating: null
+    };
+
+    setMessages((current) => [...current, assistantMessage]);
+    dispatchNiaActionExecuted(data, "nia_audio");
+  } catch (err) {
+    const assistantMessage: ChatMessage = {
+      id: crypto.randomUUID(),
+      direction: "assistant",
+      text: err instanceof Error ? err.message : "No se pudo transcribir o ejecutar el audio.",
+      tool: "nia_audio_error",
+      audit_id: null,
+      feedback_rating: null
+    };
+
+    setMessages((current) => [...current, assistantMessage]);
+  } finally {
+    setAudioSending(false);
+    setSending(false);
+  }
+}
+
+  async function startNiaAudioRecording() {
+    if (audioRecording || audioSending || sending) return;
+
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      const assistantMessage: ChatMessage = {
+        id: crypto.randomUUID(),
+        direction: "assistant",
+        text: "Este navegador no permite grabar audio para NIA.",
+        tool: "nia_audio_error",
+        audit_id: null,
+        feedback_rating: null
+      };
+
+      setMessages((current) => [...current, assistantMessage]);
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mimeType = getNiaRecorderMimeType();
+
+      const recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream);
+
+      audioChunksRef.current = [];
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      recorder.onstop = () => {
+        const finalMimeType = recorder.mimeType || mimeType || "audio/webm";
+        const audioBlob = new Blob(audioChunksRef.current, {
+          type: finalMimeType
+        });
+
+        stream.getTracks().forEach((track) => track.stop());
+        audioRecorderRef.current = null;
+        audioChunksRef.current = [];
+        setAudioRecording(false);
+
+        if (audioBlob.size > 0) {
+          void sendAudioToNia(audioBlob, finalMimeType);
+        }
+      };
+
+      audioRecorderRef.current = recorder;
+      recorder.start();
+      setAudioRecording(true);
+    } catch (err) {
+      const assistantMessage: ChatMessage = {
+        id: crypto.randomUUID(),
+        direction: "assistant",
+        text: err instanceof Error ? err.message : "No se pudo iniciar la grabación de audio.",
+        tool: "nia_audio_error",
+        audit_id: null,
+        feedback_rating: null
+      };
+
+      setMessages((current) => [...current, assistantMessage]);
+      setAudioRecording(false);
+    }
+  }
+
+  function stopNiaAudioRecording() {
+    const recorder = audioRecorderRef.current;
+
+    if (!recorder || recorder.state === "inactive") {
+      setAudioRecording(false);
+      return;
+    }
+
+    recorder.stop();
+  }
+
+  function handleNiaMicButtonClick() {
+    if (audioRecording) {
+      stopNiaAudioRecording();
+      return;
+    }
+
+    void startNiaAudioRecording();
   }
 
   useEffect(() => {
@@ -504,10 +777,6 @@ if (data?.action_executed) {
       if (!customEvent.detail) return;
 
       window.localStorage.setItem("nostur_nia_context", JSON.stringify(customEvent.detail));
-
-      // Importante:
-      // Actualizamos contexto, pero NO reiniciamos messages.
-      // Si reiniciamos messages, desaparecen las respuestas después de ejecutar acciones.
       setContext(customEvent.detail);
     }
 
@@ -694,10 +963,23 @@ if (data?.action_executed) {
               <div className="flex items-end gap-2 rounded-[24px] bg-[#eef2f7] p-2">
                 <button
                   type="button"
-                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl text-[#64748b] hover:bg-white"
-                  title="Audio"
+                  onClick={handleNiaMicButtonClick}
+                  disabled={sending && !audioRecording}
+                  className={[
+                    "flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl transition disabled:opacity-50",
+                    audioRecording
+                      ? "bg-red-500 text-white animate-pulse"
+                      : "text-[#64748b] hover:bg-white"
+                  ].join(" ")}
+                  title={audioRecording ? "Detener audio" : "Hablar con NIA"}
                 >
-                  <Mic size={18} />
+                  {audioRecording ? (
+                    <span className="h-3.5 w-3.5 rounded-sm bg-white" />
+                  ) : audioSending ? (
+                    <Sparkles size={18} className="animate-pulse" />
+                  ) : (
+                    <Mic size={18} />
+                  )}
                 </button>
 
                 <textarea
