@@ -175,8 +175,19 @@ const [messages, setMessages] = useState<ChatMessage[]>(() => getInitialMessages
 
   if (!clean || sending) return;
 
-  const activeContext = context;
+let activeContext = context;
 
+try {
+  const rawContext = window.localStorage.getItem("nostur_nia_context");
+
+  if (rawContext) {
+    const parsedContext = JSON.parse(rawContext) as NiaContext;
+    activeContext = parsedContext;
+    setContext(parsedContext);
+  }
+} catch {
+  activeContext = context;
+}
   const userMessage: ChatMessage = {
     id: crypto.randomUUID(),
     direction: "user",
@@ -239,10 +250,19 @@ const [messages, setMessages] = useState<ChatMessage[]>(() => getInitialMessages
     window.addEventListener("nostur:open-nia-chat", handleOpenNiaChat);
 
     return () => {
-      window.removeEventListener("nostur:open-nia-chat", handleOpenNiaChat);
+window.removeEventListener("nostur:open-nia-chat", handleOpenNiaChat);
+window.removeEventListener("nostur:nia-context-updated", handleNiaContextUpdated);
+      window.addEventListener("nostur:open-nia-chat", handleOpenNiaChat);
+window.addEventListener("nostur:nia-context-updated", handleNiaContextUpdated);
     };
   }, []);
+function handleNiaContextUpdated(event: Event) {
+  const customEvent = event as CustomEvent<NiaContext | undefined>;
 
+  if (customEvent.detail) {
+    setContext(customEvent.detail);
+  }
+}
   if (!visible) return null;
 
   return (

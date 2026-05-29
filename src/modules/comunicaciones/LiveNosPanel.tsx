@@ -517,6 +517,20 @@ export function LiveNosPanel() {
   }, [selectedId, loadConversationDetail]);
 
   useEffect(() => {
+  if (!selectedConversation) return;
+
+  const detail = buildLiveNosNiaContext();
+
+  window.localStorage.setItem("nostur_nia_context", JSON.stringify(detail));
+
+  window.dispatchEvent(
+    new CustomEvent("nostur:nia-context-updated", {
+      detail
+    })
+  );
+}, [selectedConversation, selectedContacto, selectedVendedor, selectedOportunidad]);
+
+  useEffect(() => {
     const channelName = `livenos-realtime-${Date.now()}`;
 
     const refreshCurrentConversation = () => {
@@ -2005,56 +2019,60 @@ function handleMicButtonClick() {
 
     window.open(mediaUrl, "_blank", "noopener,noreferrer");
   }
+function buildLiveNosNiaContext() {
+  if (!selectedConversation) {
+    return {
+      source: "livenos",
+      module: "comunicaciones",
+      action: "open_nia_without_conversation",
+      created_at: new Date().toISOString()
+    };
+  }
 
- function openNiaFromLiveNos() {
-  const detail = selectedConversation
-    ? {
-        source: "livenos",
-        module: "comunicaciones",
-        action: "open_nia_with_conversation_context",
+  return {
+    source: "livenos",
+    module: "comunicaciones",
+    action: "open_nia_with_conversation_context",
 
-        conversation_id: selectedConversation.id,
-        conversacion_id: selectedConversation.id,
+    conversation_id: selectedConversation.id,
+    conversacion_id: selectedConversation.id,
 
-        wa_phone: selectedConversation.wa_phone,
-        contacto_id: selectedConversation.contacto_id,
-        contacto_nombre: getDisplayName(selectedContacto, selectedConversation),
-        contacto_profile_name: selectedContacto?.profile_name || null,
+    wa_phone: selectedConversation.wa_phone,
+    contacto_id: selectedConversation.contacto_id,
+    contacto_nombre: getDisplayName(selectedContacto, selectedConversation),
+    contacto_profile_name: selectedContacto?.profile_name || null,
 
-        vendedor_id: selectedConversation.assigned_to || null,
-        vendedor_nombre: getVendedorName(selectedVendedor),
+    vendedor_id: selectedConversation.assigned_to || null,
+    vendedor_nombre: getVendedorName(selectedVendedor),
 
-        estado_gestion: selectedConversation.estado_gestion,
-        estado_comercial: selectedConversation.estado_comercial,
-        inbox: selectedConversation.inbox,
-        status: selectedConversation.status,
+    estado_gestion: selectedConversation.estado_gestion,
+    estado_comercial: selectedConversation.estado_comercial,
+    inbox: selectedConversation.inbox,
+    status: selectedConversation.status,
 
-        last_message_at: selectedConversation.last_message_at,
-        last_inbound_message_at: selectedConversation.last_inbound_message_at,
-        last_outbound_message_at: selectedConversation.last_outbound_message_at,
-        last_message_preview: selectedConversation.last_message_preview,
+    last_message_at: selectedConversation.last_message_at,
+    last_inbound_message_at: selectedConversation.last_inbound_message_at,
+    last_outbound_message_at: selectedConversation.last_outbound_message_at,
+    last_message_preview: selectedConversation.last_message_preview,
 
-        ventana_24h_abierta: Boolean(
-          selectedConversation.whatsapp_24h_expires_at &&
-            new Date(selectedConversation.whatsapp_24h_expires_at).getTime() > Date.now()
-        ),
-        whatsapp_24h_expires_at: selectedConversation.whatsapp_24h_expires_at,
+    ventana_24h_abierta: Boolean(
+      selectedConversation.whatsapp_24h_expires_at &&
+        new Date(selectedConversation.whatsapp_24h_expires_at).getTime() > Date.now()
+    ),
+    whatsapp_24h_expires_at: selectedConversation.whatsapp_24h_expires_at,
 
-        oportunidad_id: selectedOportunidad?.id || null,
-        oportunidad_score: selectedOportunidad?.score || null,
-        oportunidad_estado_id: selectedOportunidad?.estado_id || null,
-        oportunidad_datos: selectedOportunidad?.datos || null,
-        cande_activa: selectedOportunidad?.cande_activa || false,
-        cande_handoff_requested_at: selectedOportunidad?.cande_handoff_requested_at || null,
+    oportunidad_id: selectedOportunidad?.id || null,
+    oportunidad_score: selectedOportunidad?.score || null,
+    oportunidad_estado_id: selectedOportunidad?.estado_id || null,
+    oportunidad_datos: selectedOportunidad?.datos || null,
+    cande_activa: selectedOportunidad?.cande_activa || false,
+    cande_handoff_requested_at: selectedOportunidad?.cande_handoff_requested_at || null,
 
-        created_at: new Date().toISOString()
-      }
-    : {
-        source: "livenos",
-        module: "comunicaciones",
-        action: "open_nia_without_conversation",
-        created_at: new Date().toISOString()
-      };
+    created_at: new Date().toISOString()
+  };
+}
+function openNiaFromLiveNos() {
+  const detail = buildLiveNosNiaContext();
 
   window.localStorage.setItem("nostur_nia_context", JSON.stringify(detail));
 
@@ -2070,7 +2088,6 @@ function handleMicButtonClick() {
       : "NIA abierta sin conversación seleccionada."
   );
 }
-
 
 
   function renderMessageMenu(message: Mensaje) {
