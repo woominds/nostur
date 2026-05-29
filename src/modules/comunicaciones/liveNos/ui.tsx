@@ -5,7 +5,8 @@ import type {
   ConversationVM,
   InboxKey,
   Mensaje,
-  NotaConversacion
+  NotaConversacion,
+  ProfileLite
 } from "./types";
 import { INBOXES } from "./constants";
 import {
@@ -297,6 +298,35 @@ export function InboxList({
               {inboxCounts[inbox.id] || 0}
             </span>
           </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+export function SellersList({
+  profiles
+}: {
+  profiles: ProfileLite[];
+}) {
+  return (
+    <section className="shrink-0 rounded-[26px] border border-black/10 bg-white/80 p-3 shadow-sm">
+      <div className="mb-3 px-1 text-[11px] font-black uppercase tracking-[0.14em] text-[#64748b]">
+        Vendedores
+      </div>
+
+      <div className="space-y-1.5">
+        {profiles.map((profile) => (
+          <div
+            key={profile.id}
+            className="flex items-center gap-2 rounded-2xl px-2 py-2 text-xs font-bold text-[#475569]"
+          >
+            <span
+              className="h-2.5 w-2.5 rounded-full"
+              style={{ backgroundColor: profile.color || "#4f7c90" }}
+            />
+            <span className="truncate">{getVendedorName(profile)}</span>
+          </div>
         ))}
       </div>
     </section>

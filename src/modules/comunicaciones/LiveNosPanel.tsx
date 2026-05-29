@@ -32,6 +32,7 @@ import {
   HeaderButton,
   InboxList,
   MessageStatusIcon,
+  SellersList,
   StatusPill,
   getNotaVisual
 } from "./liveNos/ui";
@@ -3063,98 +3064,81 @@ function handleMicButtonClick() {
           ) : null}
         </header>
 
-        <main className="grid min-h-0 flex-1 grid-cols-[320px_410px_minmax(0,1fr)] gap-4 overflow-hidden p-4">
-          <aside className="flex min-h-0 flex-col gap-4 overflow-hidden">
-            <section className="rounded-[26px] border border-black/10 bg-white/80 p-4 shadow-sm">
-              <div className="flex items-center gap-3">
-                <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-[#ff2f76] to-[#8b2cff] text-white shadow-lg shadow-purple-500/20">
-                  <Sparkles size={20} />
-                </div>
+      <main className="grid min-h-0 flex-1 grid-cols-[320px_410px_minmax(0,1fr)] gap-4 overflow-hidden p-4">
+  <aside className="flex min-h-0 flex-col gap-4 overflow-hidden">
+    <section className="rounded-[26px] border border-black/10 bg-white/80 p-4 shadow-sm">
+      <div className="flex items-center gap-3">
+        <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-[#ff2f76] to-[#8b2cff] text-white shadow-lg shadow-purple-500/20">
+          <Sparkles size={20} />
+        </div>
 
-                <div className="min-w-0">
-                  <div className="text-sm font-black text-[#142033]">NIA interno</div>
-                  <div className="truncate text-xs font-bold text-[#64748b]">
-                    Pedime resúmenes, acciones o derivaciones.
-                  </div>
-                </div>
-              </div>
+        <div className="min-w-0">
+          <div className="text-sm font-black text-[#142033]">NIA interno</div>
+          <div className="truncate text-xs font-bold text-[#64748b]">
+            Pedime resúmenes, acciones o derivaciones.
+          </div>
+        </div>
+      </div>
 
-              <button
-                type="button"
-                onClick={openNiaFromLiveNos}
-                className="mt-3 h-10 w-full rounded-2xl bg-[#7c3aed] text-xs font-black text-white shadow-sm hover:bg-[#6d28d9]"
-              >
-                Abrir NIA
-              </button>
-            </section>
-<InboxList
-  activeInbox={activeInbox}
-  inboxCounts={inboxCounts}
-  onChangeInbox={setActiveInbox}
-/>
+      <button
+        type="button"
+        onClick={openNiaFromLiveNos}
+        className="mt-3 h-10 w-full rounded-2xl bg-[#7c3aed] text-xs font-black text-white shadow-sm hover:bg-[#6d28d9]"
+      >
+        Abrir NIA
+      </button>
+    </section>
 
-            <section className="shrink-0 rounded-[26px] border border-black/10 bg-white/80 p-3 shadow-sm">
-              <div className="mb-3 px-1 text-[11px] font-black uppercase tracking-[0.14em] text-[#64748b]">
-                Vendedores
-              </div>
+    <InboxList
+      activeInbox={activeInbox}
+      inboxCounts={inboxCounts}
+      onChangeInbox={setActiveInbox}
+    />
 
-              <div className="space-y-1.5">
-                {profiles.map((profile) => (
-                  <div
-                    key={profile.id}
-                    className="flex items-center gap-2 rounded-2xl px-2 py-2 text-xs font-bold text-[#475569]"
-                  >
-                    <span
-                      className="h-2.5 w-2.5 rounded-full"
-                      style={{ backgroundColor: profile.color || "#4f7c90" }}
-                    />
-                    <span className="truncate">{getVendedorName(profile)}</span>
-                  </div>
-                ))}
-              </div>
-            </section>
-          </aside>
+    <SellersList profiles={profiles} />
+  </aside>
 
-          <section className="flex min-h-0 flex-col overflow-hidden rounded-[28px] border border-black/10 bg-white/80 shadow-sm">
-            <div className="shrink-0 border-b border-black/10 p-3">
-              <div className="flex h-10 items-center gap-2 rounded-2xl border border-black/10 bg-[#f8fafc] px-3">
-                <Search size={15} className="text-[#94a3b8]" />
+  <section className="flex min-h-0 flex-col overflow-hidden rounded-[28px] border border-black/10 bg-white/80 shadow-sm">
+    <div className="shrink-0 border-b border-black/10 p-3">
+      <div className="flex h-10 items-center gap-2 rounded-2xl border border-black/10 bg-[#f8fafc] px-3">
+        <Search size={15} className="text-[#94a3b8]" />
 
-                <input
-                  value={search}
-                  onChange={(event) => setSearch(event.target.value)}
-                  placeholder="Buscar conversación..."
-                  className="h-full min-w-0 flex-1 bg-transparent text-sm font-bold text-[#142033] outline-none placeholder:text-[#94a3b8]"
-                />
-              </div>
+        <input
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="Buscar conversación..."
+          className="h-full min-w-0 flex-1 bg-transparent text-sm font-bold text-[#142033] outline-none placeholder:text-[#94a3b8]"
+        />
+      </div>
 
-              <div className="mt-2 text-xs font-bold text-[#64748b]">
-                {filteredConversations.length} conversaciones en{" "}
-                {INBOXES.find((item) => item.id === activeInbox)?.label}
-              </div>
-            </div>
+      <div className="mt-2 text-xs font-bold text-[#64748b]">
+        {filteredConversations.length} conversaciones en{" "}
+        {INBOXES.find((item) => item.id === activeInbox)?.label}
+      </div>
+    </div>
 
-            <div className="min-h-0 flex-1 space-y-2 overflow-auto p-3">
-              {loading ? (
-                <div className="flex h-48 items-center justify-center">
-                  <Loader2 size={22} className="animate-spin text-[#4f7c90]" />
-                </div>
-              ) : filteredConversations.length === 0 ? (
-                <EmptyState
-                  title="Sin conversaciones"
-                  subtitle="Cuando ingresen mensajes por WhatsApp aparecerán en esta bandeja."
-                />
-              ) : (
-filteredConversations.map((conv) => (
-  <ConversationCard
-    key={conv.id}
-    conv={conv}
-    selectedId={selectedId}
-    onSelect={selectConversation}
-  />
-))              )}
-            </div>
-          </section>
+    <div className="min-h-0 flex-1 space-y-2 overflow-auto p-3">
+      {loading ? (
+        <div className="flex h-48 items-center justify-center">
+          <Loader2 size={22} className="animate-spin text-[#4f7c90]" />
+        </div>
+      ) : filteredConversations.length === 0 ? (
+        <EmptyState
+          title="Sin conversaciones"
+          subtitle="Cuando ingresen mensajes por WhatsApp aparecerán en esta bandeja."
+        />
+      ) : (
+        filteredConversations.map((conv) => (
+          <ConversationCard
+            key={conv.id}
+            conv={conv}
+            selectedId={selectedId}
+            onSelect={selectConversation}
+          />
+        ))
+      )}
+    </div>
+  </section>
 
           <section className="flex min-h-0 flex-col overflow-hidden rounded-[28px] border border-black/10 bg-white/80 shadow-sm">
             {!selectedConversation ? (
