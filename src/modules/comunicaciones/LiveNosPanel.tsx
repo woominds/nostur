@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
 import {
   Archive,
   Bot,
@@ -8,7 +7,6 @@ import {
   Eye,
   FileText,
   Image,
-  Inbox,
   Loader2,
   MessageCircle,
   Mic,
@@ -22,12 +20,12 @@ import {
   Sparkles,
   Trash2,
   UserCheck,
-  Users,
   Wand2,
   XCircle
 } from "lucide-react";
 import { supabase } from "../../lib/supabase";
 import { EmptyState, Pill } from "./comunicacionesShared";
+import { EMOJI_GROUPS, INBOXES, QUICK_EMOJIS } from "./liveNos/constants";
 import {
   ComposerIconButton,
   HeaderButton,
@@ -222,72 +220,7 @@ type TimelineItem =
       nota: NotaConversacion;
     };
 
-const INBOXES: {
-  id: InboxKey;
-  label: string;
-  description: string;
-  icon: ReactNode;
-}[] = [
-  {
-    id: "sin_atender",
-    label: "Sin atender",
-    description: "Conversaciones nuevas o sin vendedor.",
-    icon: <Inbox size={15} />
-  },
-  {
-    id: "en_gestion",
-    label: "En gestión",
-    description: "Conversaciones tomadas por vendedores.",
-    icon: <UserCheck size={15} />
-  },
-  {
-    id: "cande",
-    label: "Cande",
-    description: "Oportunidades con IA activa.",
-    icon: <Bot size={15} />
-  },
-  {
-    id: "colaboracion",
-    label: "Colaboración",
-    description: "Conversaciones con participantes internos.",
-    icon: <Users size={15} />
-  },
-  {
-    id: "cerradas",
-    label: "Cerradas",
-    description: "Conversaciones resueltas.",
-    icon: <CheckCircle2 size={15} />
-  },
-  {
-    id: "archivadas",
-    label: "Archivadas",
-    description: "Historial operativo.",
-    icon: <Archive size={15} />
-  },
-  {
-    id: "eliminadas",
-    label: "Eliminadas",
-    description: "Eliminación lógica.",
-    icon: <Trash2 size={15} />
-  }
-];
 
-const QUICK_EMOJIS = ["👍", "❤️", "😂", "😮", "🙏", "👏"];
-
-const EMOJI_GROUPS = [
-  {
-    label: "Frecuentes",
-    emojis: ["😊", "😉", "👍", "🙏", "👏", "💪", "🙌", "👌", "✨", "✅", "📌", "🧳"]
-  },
-  {
-    label: "Viajes",
-    emojis: ["✈️", "🏝️", "🏖️", "🏨", "🚢", "🛳️", "🗺️", "🌎", "🧭", "🎒", "🛫", "🛬"]
-  },
-  {
-    label: "Atención",
-    emojis: ["📲", "📩", "📄", "💳", "💵", "🕐", "📅", "🔎", "⭐", "🔥", "🎯", "💬"]
-  }
-];
 
 function formatDateTime(value?: string | null): string {
   if (!value) return "—";
