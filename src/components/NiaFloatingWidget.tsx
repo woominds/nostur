@@ -435,8 +435,36 @@ export function NiaFloatingWidget({ activeUrl }: NiaFloatingWidgetProps) {
         feedback_rating: null
       };
 
-      setMessages((current) => [...current, assistantMessage]);
-    } catch (err) {
+setMessages((current) => [...current, assistantMessage]);
+
+if (data?.action_executed) {
+  window.dispatchEvent(
+    new CustomEvent("nostur:nia-action-executed", {
+      detail: {
+        source: "nia",
+        tool: data?.tool || null,
+        conversation_id: data?.conversation_id || null,
+        action_result: data?.action_result || null,
+        created_at: new Date().toISOString()
+      }
+    })
+  );
+}
+
+
+if (data?.action_executed) {
+  window.dispatchEvent(
+    new CustomEvent("nostur:nia-action-executed", {
+      detail: {
+        source: "nia",
+        tool: data?.tool || null,
+        conversation_id: data?.conversation_id || null,
+        action_result: data?.action_result || null,
+        created_at: new Date().toISOString()
+      }
+    })
+  );
+}    } catch (err) {
       const assistantMessage: ChatMessage = {
         id: crypto.randomUUID(),
         direction: "assistant",

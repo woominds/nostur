@@ -13,6 +13,8 @@
    - ejecuta acciones explícitas:
      marcar urgente, pausar/activar CANDE, tomar conversación,
      crear nota interna, crear recordatorio, cambiar estado pipeline
+   - permite cambiar estado de pipeline desde Oportunidades usando nombre:
+     "pasa batica a presupuestada", "pasar Alan a en gestión"
    - guarda auditoría en nia_interacciones
    - devuelve audit_id para feedback desde el widget
 ========================================================= */
@@ -48,6 +50,16 @@ function getErrorMessage(error: unknown): string {
   }
 
   return String(error);
+}
+
+function normalizeForIntent(value: string): string {
+  return cleanText(value)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\w\s+]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function getSupabaseAdmin() {
@@ -126,13 +138,6 @@ function formatJson(value: unknown): string {
   }
 }
 
-function normalizeForIntent(value: string): string {
-  return cleanText(value)
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
-}
-
 function formatMessageForPrompt(message: any): string {
   const direction =
     message.direction === "in" || message.direction === "inbound"
@@ -190,19 +195,7 @@ async function loadNiaTrainingMemory(params: { supabase: any }) {
   const [negativeRes, positiveRes] = await Promise.all([
     params.supabase
       .from("nia_interacciones")
-      .select(`
-        id,
-        created_at,
-        user_message,
-        assistant_response,
-        feedback_rating,
-        feedback_comment,
-        feedback_created_at,
-        module,
-        source,
-        tool,
-        metadata
-      `)
+      .select("id,created_at,user_message,assistant_response,feedback_rating,feedback_comment,feedback_created_at,module,source,tool,metadata")
       .eq("feedback_rating", "negative")
       .not("feedback_comment", "is", null)
       .order("feedback_created_at", { ascending: false, nullsFirst: false })
@@ -210,19 +203,7 @@ async function loadNiaTrainingMemory(params: { supabase: any }) {
 
     params.supabase
       .from("nia_interacciones")
-      .select(`
-        id,
-        created_at,
-        user_message,
-        assistant_response,
-        feedback_rating,
-        feedback_comment,
-        feedback_created_at,
-        module,
-        source,
-        tool,
-        metadata
-      `)
+      .select("id,created_at,user_message,assistant_response,feedback_rating,feedback_comment,feedback_created_at,module,source,tool,metadata")
       .eq("feedback_rating", "positive")
       .order("feedback_created_at", { ascending: false, nullsFirst: false })
       .limit(6)
@@ -249,6 +230,7 @@ async function loadGeneralCommercialContext(params: { supabase: any }) {
       .from("conversaciones")
       .select(`
         id,
+        contacto_id,
         wa_phone,
         titulo,
         subject,
@@ -276,6 +258,7 @@ async function loadGeneralCommercialContext(params: { supabase: any }) {
       .from("conversaciones")
       .select(`
         id,
+        contacto_id,
         wa_phone,
         titulo,
         subject,
@@ -468,10 +451,6 @@ FUNCIÓN DE NIA:
 - proponer respuestas listas para copiar y pegar, indicando si son para el pasajero, para el vendedor o para uso interno
 - detectar si conviene activar, pausar o mantener CANDE
 - ayudar al vendedor a ordenar oportunidad, datos faltantes y urgencias
-- Para cambiar el estado del pipeline necesitás identificar una oportunidad concreta.
-- Si hay conversation_id, trabajá sobre la oportunidad vinculada a esa conversación.
-- Si no hay conversation_id ni oportunidad_id, no ejecutes cambios de pipeline: pedí al usuario que seleccione la oportunidad o que abra NIA desde la tarjeta correcta.
-- No cambies estados de pipeline por contexto general si puede haber ambigüedad.
 
 ESTILO:
 - Respondé en español de Argentina.
@@ -739,7 +718,7 @@ type NiaAction =
   | { type: "take_conversation" }
   | { type: "create_internal_note"; text: string }
   | { type: "create_reminder"; text: string }
-  | { type: "change_pipeline_status"; statusName: string };
+  | { type: "change_pipeline_status"; statusName: string; targetName?: string | null };
 
 function extractTextAfterSeparators(message: string): string {
   const clean = cleanText(message);
@@ -756,32 +735,130 @@ function extractTextAfterSeparators(message: string): string {
   return clean;
 }
 
+function extractPipelineTargetAndStatus(userMessage: string): { targetName: string | null; statusName: string | null } {
+  const original = cleanText(userMessage);
+  const normalized = normalizeForIntent(original);
+
+  const estadosConocidos = [
+    "sin atender",
+    "nuevo",
+    "nueva",
+    "en gestion",
+    "en gestión",
+    "presupuestada",
+    "presupuestado",
+    "cotizada",
+    "cotizado",
+    "vendida",
+    "vendido",
+    "ganada",
+    "ganado",
+    "perdida",
+    "perdido",
+    "cerrada",
+    "cerrado"
+  ];
+
+  for (const estado of estadosConocidos) {
+    const estadoNorm = normalizeForIntent(estado);
+
+    if (!normalized.includes(estadoNorm)) continue;
+
+    let target = ` ${normalized} `;
+
+    const frasesAEliminar = [
+      "pasa a",
+      "pasar a",
+      "pasala a",
+      "pasalo a",
+      "mover a",
+      "movela a",
+      "movelo a",
+      "cambiar a",
+      "cambia a",
+      "cambiala a",
+      "cambialo a",
+      "cambiar estado a",
+      "cambia estado a",
+      "cambiar el estado a",
+      "cambia el estado a",
+      "pasa",
+      "pasar",
+      "pasala",
+      "pasalo",
+      "mover",
+      "movela",
+      "movelo",
+      "cambiar",
+      "cambia",
+      "cambiala",
+      "cambialo",
+      "estado",
+      "el contacto",
+      "contacto",
+      "la oportunidad de",
+      "la oportunidad",
+      "oportunidad",
+      "la conversacion de",
+      "la conversación de",
+      "la conversacion",
+      "la conversación",
+      "conversacion",
+      "conversación",
+      "la de",
+      "el de"
+    ];
+
+    frasesAEliminar.forEach((frase) => {
+      const fraseNorm = normalizeForIntent(frase);
+      target = target.replaceAll(` ${fraseNorm} `, " ");
+    });
+
+    target = target.replaceAll(` ${estadoNorm} `, " ");
+
+    // Limpieza final segura: elimina conectores sueltos, pero NO borra letras dentro de nombres.
+    const tokens = target
+      .replace(/\s+/g, " ")
+      .trim()
+      .split(" ")
+      .filter(Boolean)
+      .filter((token) => !["a", "al", "el", "la", "de"].includes(token));
+
+    target = tokens.join(" ").trim();
+
+    return {
+      targetName: target || null,
+      statusName: estado
+    };
+  }
+
+  return {
+    targetName: null,
+    statusName: null
+  };
+}
+
 function detectNiaAction(userMessage: string): NiaAction | null {
   const normalized = normalizeForIntent(userMessage);
 
   function hasPhrase(phrases: string[]) {
-    return phrases.some((phrase) => normalized.includes(phrase));
+    return phrases.some((phrase) => normalized.includes(normalizeForIntent(phrase)));
   }
 
   if (
     hasPhrase([
       "pausar cande",
       "pausa cande",
-      "pause cande",
       "desactivar cande",
       "desactiva cande",
-      "desactive cande",
-      "desactiven cande",
       "apagar cande",
       "apaga cande",
-      "apague cande",
-      "sacar cande",
-      "quita cande",
       "quitar cande",
-      "frena cande",
+      "quita cande",
       "frenar cande",
-      "suspende cande",
-      "suspender cande"
+      "frena cande",
+      "suspender cande",
+      "suspende cande"
     ])
   ) {
     return { type: "pause_cande" };
@@ -791,7 +868,6 @@ function detectNiaAction(userMessage: string): NiaAction | null {
     hasPhrase([
       "activar cande",
       "activa cande",
-      "active cande",
       "encender cande",
       "encende cande",
       "prender cande",
@@ -808,13 +884,9 @@ function detectNiaAction(userMessage: string): NiaAction | null {
       "marcar urgente",
       "marcala urgente",
       "marcalo urgente",
-      "marcar esta conversacion como urgente",
-      "marcar esta conversación como urgente",
+      "poner urgente",
       "ponela urgente",
       "ponelo urgente",
-      "poner urgente",
-      "pasala a urgente",
-      "pasalo a urgente",
       "urgente esta conversacion",
       "urgente esta conversación"
     ])
@@ -835,9 +907,7 @@ function detectNiaAction(userMessage: string): NiaAction | null {
       "asignamela",
       "asignámela",
       "me la asignas",
-      "me la asignás",
-      "dejámela a mi",
-      "dejamela a mi"
+      "me la asignás"
     ])
   ) {
     return { type: "take_conversation" };
@@ -849,8 +919,7 @@ function detectNiaAction(userMessage: string): NiaAction | null {
       "generar nota interna",
       "agregar nota interna",
       "guardar nota interna",
-      "dejar nota interna",
-      "dejale una nota interna"
+      "dejar nota interna"
     ])
   ) {
     return {
@@ -876,31 +945,57 @@ function detectNiaAction(userMessage: string): NiaAction | null {
     };
   }
 
-  const pipelinePatterns = [
-    "cambiar estado a ",
-    "cambia estado a ",
-    "cambia el estado a ",
-    "cambiar el estado a ",
-    "pasar a ",
-    "pasala a ",
-    "pasalo a ",
-    "mover a ",
-    "movela a ",
-    "movelo a "
+  const pipelineActionWords = [
+    "pasa",
+    "pasar",
+    "pasala",
+    "pasalo",
+    "mover",
+    "movela",
+    "movelo",
+    "cambiar",
+    "cambia",
+    "cambiala",
+    "cambialo"
   ];
 
-  for (const pattern of pipelinePatterns) {
-    const index = normalized.indexOf(pattern);
+  const pipelineStateWords = [
+    "sin atender",
+    "nuevo",
+    "nueva",
+    "en gestion",
+    "en gestión",
+    "presupuestada",
+    "presupuestado",
+    "cotizada",
+    "cotizado",
+    "vendida",
+    "vendido",
+    "ganada",
+    "ganado",
+    "perdida",
+    "perdido",
+    "cerrada",
+    "cerrado"
+  ];
 
-    if (index >= 0) {
-      const statusName = cleanText(userMessage.slice(index + pattern.length));
+  const hasPipelineAction = pipelineActionWords.some((word) =>
+    normalized.includes(normalizeForIntent(word))
+  );
 
-      if (statusName) {
-        return {
-          type: "change_pipeline_status",
-          statusName
-        };
-      }
+  const hasPipelineState = pipelineStateWords.some((word) =>
+    normalized.includes(normalizeForIntent(word))
+  );
+
+  if (hasPipelineAction && hasPipelineState) {
+    const targetStatus = extractPipelineTargetAndStatus(userMessage);
+
+    if (targetStatus.statusName) {
+      return {
+        type: "change_pipeline_status",
+        statusName: targetStatus.statusName,
+        targetName: targetStatus.targetName
+      };
     }
   }
 
@@ -922,6 +1017,174 @@ async function getOpportunityForConversation(params: {
   return data || null;
 }
 
+async function findOpportunityByTargetName(params: {
+  supabase: any;
+  targetName: string | null | undefined;
+}) {
+  const target = normalizeForIntent(params.targetName || "");
+
+  if (!target) return null;
+
+  const [oportunidadesRes, conversacionesRes, contactosRes] = await Promise.all([
+    params.supabase
+      .from("lead_oportunidades")
+      .select("id,conversacion_id,estado_id,score,datos,assigned_to,cande_activa,updated_at,created_at")
+      .order("updated_at", { ascending: false })
+      .limit(200),
+
+    params.supabase
+      .from("conversaciones")
+      .select("id,contacto_id,wa_phone,titulo,subject,assigned_to,estado_gestion,estado_comercial,last_message_preview")
+      .is("deleted_at", null)
+      .limit(500),
+
+    params.supabase
+      .from("contactos_wa")
+      .select("id,wa_phone,display_name,profile_name")
+      .limit(500)
+  ]);
+
+  if (oportunidadesRes.error) throw oportunidadesRes.error;
+  if (conversacionesRes.error) throw conversacionesRes.error;
+  if (contactosRes.error) throw contactosRes.error;
+
+  const conversacionesMap = new Map<string, any>();
+  (conversacionesRes.data || []).forEach((conv: any) => {
+    conversacionesMap.set(conv.id, conv);
+  });
+
+  const contactosMap = new Map<string, any>();
+  (contactosRes.data || []).forEach((contacto: any) => {
+    contactosMap.set(contacto.id, contacto);
+  });
+
+  const enriched = (oportunidadesRes.data || []).map((opp: any) => {
+    const conv = conversacionesMap.get(opp.conversacion_id) || null;
+    const contacto = conv?.contacto_id ? contactosMap.get(conv.contacto_id) || null : null;
+
+    return {
+      ...opp,
+      conversacion: conv,
+      contacto
+    };
+  });
+
+  const matches = enriched.filter((item: any) => {
+    const conv = item.conversacion || {};
+    const contacto = item.contacto || {};
+    const datos = item.datos || {};
+
+    const haystack = [
+      datos.nombre,
+      datos.contacto_nombre,
+      datos.pasajero,
+      datos.nombre_pasajero,
+      datos.cliente,
+      datos.contacto,
+      datos.telefono,
+      datos.wa_phone,
+      datos.whatsapp,
+      conv.titulo,
+      conv.subject,
+      conv.wa_phone,
+      contacto.display_name,
+      contacto.profile_name,
+      contacto.wa_phone
+    ]
+      .filter(Boolean)
+      .map((value) => normalizeForIntent(String(value)))
+      .join(" ");
+
+    return haystack.includes(target) || target.includes(haystack);
+  });
+
+  if (matches.length === 1) {
+    return matches[0];
+  }
+
+  if (matches.length > 1) {
+    return {
+      multiple: true,
+      matches
+    };
+  }
+
+  return null;
+}
+
+function getDisplayNameFromOpportunity(item: any) {
+  const datos = item?.datos || {};
+  const conv = item?.conversacion || {};
+  const contacto = item?.contacto || {};
+
+  return (
+    cleanText(datos.nombre) ||
+    cleanText(datos.contacto_nombre) ||
+    cleanText(datos.pasajero) ||
+    cleanText(datos.nombre_pasajero) ||
+    cleanText(contacto.display_name) ||
+    cleanText(contacto.profile_name) ||
+    cleanText(conv.titulo) ||
+    cleanText(conv.subject) ||
+    cleanText(conv.wa_phone) ||
+    "Sin nombre"
+  );
+}
+
+function getPhoneFromOpportunity(item: any) {
+  const datos = item?.datos || {};
+  const conv = item?.conversacion || {};
+  const contacto = item?.contacto || {};
+
+  return (
+    cleanText(datos.telefono) ||
+    cleanText(datos.wa_phone) ||
+    cleanText(datos.whatsapp) ||
+    cleanText(contacto.wa_phone) ||
+    cleanText(conv.wa_phone) ||
+    ""
+  );
+}
+
+function enrichOpportunityDatos(params: {
+  oportunidad: any;
+  conversation: any;
+  contacto: any;
+}) {
+  const datosActuales =
+    params.oportunidad?.datos && typeof params.oportunidad.datos === "object"
+      ? params.oportunidad.datos
+      : {};
+
+  const nombreContacto =
+    cleanText(params.contacto?.display_name) ||
+    cleanText(params.contacto?.profile_name) ||
+    cleanText(params.conversation?.titulo) ||
+    cleanText(params.conversation?.subject) ||
+    cleanText(params.conversation?.wa_phone) ||
+    "Sin nombre";
+
+  const telefonoContacto =
+    cleanText(params.contacto?.wa_phone) ||
+    cleanText(params.conversation?.wa_phone) ||
+    "";
+
+  return {
+    ...datosActuales,
+    nombre: cleanText((datosActuales as any).nombre) || nombreContacto,
+    contacto_nombre: cleanText((datosActuales as any).contacto_nombre) || nombreContacto,
+    pasajero: cleanText((datosActuales as any).pasajero) || nombreContacto,
+    telefono: cleanText((datosActuales as any).telefono) || telefonoContacto,
+    wa_phone: cleanText((datosActuales as any).wa_phone) || telefonoContacto,
+    ultimo_mensaje:
+      cleanText((datosActuales as any).ultimo_mensaje) ||
+      cleanText(params.conversation?.last_message_preview) ||
+      null,
+    origen_livenos: true,
+    conversation_id: params.conversation?.id || params.oportunidad?.conversacion_id || null
+  };
+}
+
 async function executeNiaAction(params: {
   supabase: any;
   action: NiaAction;
@@ -930,7 +1193,7 @@ async function executeNiaAction(params: {
   payload: any;
 }) {
   const now = new Date().toISOString();
-  const conversationId = params.conversationId;
+  const initialConversationId = params.conversationId;
 
   if (!params.userId) {
     return {
@@ -941,7 +1204,7 @@ async function executeNiaAction(params: {
     };
   }
 
-  if (!conversationId) {
+  if (!initialConversationId && params.action.type !== "change_pipeline_status") {
     return {
       executed: false,
       ok: false,
@@ -963,7 +1226,7 @@ async function executeNiaAction(params: {
           nia_last_action_by: params.userId
         }
       })
-      .eq("id", conversationId);
+      .eq("id", initialConversationId);
 
     if (error) throw error;
 
@@ -973,7 +1236,7 @@ async function executeNiaAction(params: {
       text: "Listo. Marqué esta conversación como urgente.",
       action_result: {
         action: "mark_urgent",
-        conversation_id: conversationId
+        conversation_id: initialConversationId
       }
     };
   }
@@ -989,7 +1252,7 @@ async function executeNiaAction(params: {
         inbox: "vendedor",
         updated_at: now
       })
-      .eq("id", conversationId);
+      .eq("id", initialConversationId);
 
     if (error) throw error;
 
@@ -999,7 +1262,7 @@ async function executeNiaAction(params: {
       text: "Listo. Tomé la conversación y la dejé en gestión.",
       action_result: {
         action: "take_conversation",
-        conversation_id: conversationId,
+        conversation_id: initialConversationId,
         assigned_to: params.userId
       }
     };
@@ -1008,7 +1271,7 @@ async function executeNiaAction(params: {
   if (params.action.type === "pause_cande" || params.action.type === "activate_cande") {
     const oportunidad = await getOpportunityForConversation({
       supabase: params.supabase,
-      conversationId
+      conversationId: initialConversationId
     });
 
     if (!oportunidad?.id) {
@@ -1040,7 +1303,7 @@ async function executeNiaAction(params: {
         : "Listo. Pausé CANDE para esta oportunidad.",
       action_result: {
         action: params.action.type,
-        conversation_id: conversationId,
+        conversation_id: initialConversationId,
         oportunidad_id: oportunidad.id,
         cande_activa: nextCandeState
       }
@@ -1064,7 +1327,7 @@ async function executeNiaAction(params: {
     const { error } = await params.supabase
       .from("notas_conversacion")
       .insert({
-        conversacion_id: conversationId,
+        conversacion_id: initialConversationId,
         autor_id: params.userId,
         contenido: text,
         tipo: params.action.type === "create_reminder" ? "recordatorio" : "mensaje_interno",
@@ -1082,17 +1345,76 @@ async function executeNiaAction(params: {
           : `Listo. Generé la nota interna: "${text}"`,
       action_result: {
         action: params.action.type,
-        conversation_id: conversationId,
+        conversation_id: initialConversationId,
         text
       }
     };
   }
 
   if (params.action.type === "change_pipeline_status") {
-    let oportunidad = await getOpportunityForConversation({
-      supabase: params.supabase,
-      conversationId
-    });
+    let resolvedConversationId = initialConversationId;
+    let oportunidad: any = null;
+
+    if (resolvedConversationId) {
+      oportunidad = await getOpportunityForConversation({
+        supabase: params.supabase,
+        conversationId: resolvedConversationId
+      });
+    }
+
+    if (!resolvedConversationId && params.action.targetName) {
+      const found = await findOpportunityByTargetName({
+        supabase: params.supabase,
+        targetName: params.action.targetName
+      });
+
+      if (!found) {
+        return {
+          executed: false,
+          ok: false,
+          text: `No encontré una oportunidad que coincida con "${params.action.targetName}". Probá con el nombre exacto que figura en la card.`,
+          action_result: {
+            action: "change_pipeline_status",
+            target_name: params.action.targetName,
+            reason: "target_not_found"
+          }
+        };
+      }
+
+      if (found.multiple) {
+        const opciones = found.matches
+          .slice(0, 5)
+          .map((item: any, index: number) => `${index + 1}. ${getDisplayNameFromOpportunity(item)}`)
+          .join("\n");
+
+        return {
+          executed: false,
+          ok: false,
+          text: `Encontré más de una oportunidad que coincide con "${params.action.targetName}". Necesito que seas más específico.\n\n${opciones}`,
+          action_result: {
+            action: "change_pipeline_status",
+            target_name: params.action.targetName,
+            reason: "multiple_matches"
+          }
+        };
+      }
+
+      oportunidad = found;
+      resolvedConversationId = found.conversacion_id || found.conversation_id || null;
+    }
+
+    if (!resolvedConversationId) {
+      return {
+        executed: false,
+        ok: false,
+        text: "No pude identificar la conversación vinculada a esa oportunidad.",
+        action_result: {
+          action: "change_pipeline_status",
+          target_name: params.action.targetName || null,
+          reason: "missing_conversation_id"
+        }
+      };
+    }
 
     const requestedStatus = normalizeForIntent(params.action.statusName);
 
@@ -1138,7 +1460,7 @@ async function executeNiaAction(params: {
         whatsapp_24h_expires_at,
         metadata
       `)
-      .eq("id", conversationId)
+      .eq("id", resolvedConversationId)
       .maybeSingle();
 
     if (conversationError) throw conversationError;
@@ -1166,38 +1488,18 @@ async function executeNiaAction(params: {
       contacto = contactoData || null;
     }
 
-    const nombreContacto =
-      cleanText(contacto?.display_name) ||
-      cleanText(contacto?.profile_name) ||
-      cleanText(conversation.titulo) ||
-      cleanText(conversation.subject) ||
-      cleanText(conversation.wa_phone) ||
-      "Sin nombre";
+    if (!oportunidad?.id) {
+      oportunidad = await getOpportunityForConversation({
+        supabase: params.supabase,
+        conversationId: resolvedConversationId
+      });
+    }
 
-    const telefonoContacto =
-      cleanText(contacto?.wa_phone) ||
-      cleanText(conversation.wa_phone) ||
-      "";
-
-    const datosActuales =
-      oportunidad?.datos && typeof oportunidad.datos === "object"
-        ? oportunidad.datos
-        : {};
-
-    const datosEnriquecidos = {
-      ...datosActuales,
-      nombre: cleanText((datosActuales as any).nombre) || nombreContacto,
-      contacto_nombre: cleanText((datosActuales as any).contacto_nombre) || nombreContacto,
-      pasajero: cleanText((datosActuales as any).pasajero) || nombreContacto,
-      telefono: cleanText((datosActuales as any).telefono) || telefonoContacto,
-      wa_phone: cleanText((datosActuales as any).wa_phone) || telefonoContacto,
-      ultimo_mensaje:
-        cleanText((datosActuales as any).ultimo_mensaje) ||
-        cleanText(conversation.last_message_preview) ||
-        null,
-      origen_livenos: true,
-      conversation_id: conversation.id
-    };
+    const datosEnriquecidos = enrichOpportunityDatos({
+      oportunidad,
+      conversation,
+      contacto
+    });
 
     if (!oportunidad?.id) {
       const { data: insertedOpportunity, error: insertOpportunityError } = await params.supabase
@@ -1231,7 +1533,7 @@ async function executeNiaAction(params: {
       if (error) throw error;
     }
 
-    await params.supabase
+    const { error: updateConversationError } = await params.supabase
       .from("conversaciones")
       .update({
         estado_gestion: estado.es_sin_atender ? "sin_atender" : "en_gestion",
@@ -1240,18 +1542,33 @@ async function executeNiaAction(params: {
       })
       .eq("id", conversation.id);
 
+    if (updateConversationError) throw updateConversationError;
+
+    const nombreContacto =
+      cleanText(datosEnriquecidos.nombre) ||
+      cleanText(datosEnriquecidos.contacto_nombre) ||
+      getDisplayNameFromOpportunity({
+        ...oportunidad,
+        conversacion: conversation,
+        contacto
+      });
+
     return {
       executed: true,
       ok: true,
-      text: `Listo. Cambié la oportunidad al estado "${estado.nombre}" y actualicé los datos visibles del pipeline con el contacto ${nombreContacto}.`,
+      text: `Listo. Cambié la oportunidad de ${nombreContacto} al estado "${estado.nombre}".`,
       action_result: {
         action: "change_pipeline_status",
-        conversation_id: conversationId,
+        conversation_id: resolvedConversationId,
         oportunidad_id: oportunidad.id,
         estado_id: estado.id,
         estado_nombre: estado.nombre,
         contacto_nombre: nombreContacto,
-        telefono: telefonoContacto
+        telefono: cleanText(datosEnriquecidos.telefono) || getPhoneFromOpportunity({
+          ...oportunidad,
+          conversacion: conversation,
+          contacto
+        })
       }
     };
   }
@@ -1288,10 +1605,6 @@ serve(async (req) => {
       conversationId
     });
 
-    const generalContext = conversationId
-      ? null
-      : await loadGeneralCommercialContext({ supabase });
-
     const detectedAction = detectNiaAction(userMessage);
 
     if (detectedAction) {
@@ -1311,7 +1624,7 @@ serve(async (req) => {
         payload,
         userMessage,
         assistantResponse: actionResponse.text,
-        conversationId,
+        conversationId: actionResponse.action_result?.conversation_id || conversationId,
         tool,
         usedOpenai: false,
         success: actionResponse.ok,
@@ -1320,22 +1633,26 @@ serve(async (req) => {
         actionResult: actionResponse.action_result,
         actionExecuted: actionResponse.executed
       });
-
-      return jsonResponse(
-        {
-          ok: actionResponse.ok,
-          text: actionResponse.text,
-          tool,
-          conversation_id: conversationId,
-          user_id: userId,
-          audit_id: auditId,
-          used_openai: false,
-          action_executed: actionResponse.executed,
-          action_result: actionResponse.action_result
-        },
-        actionResponse.ok ? 200 : 400
-      );
+return jsonResponse(
+  {
+    ok: actionResponse.ok,
+    text: actionResponse.text,
+    tool,
+    conversation_id: actionResponse.action_result?.conversation_id || conversationId,
+    user_id: userId,
+    audit_id: auditId,
+    used_openai: false,
+    action_executed: actionResponse.executed,
+    action_result: actionResponse.action_result,
+    error: actionResponse.ok ? null : actionResponse.text
+  },
+  200
+);
     }
+
+    const generalContext = conversationId
+      ? null
+      : await loadGeneralCommercialContext({ supabase });
 
     const systemPrompt = buildSystemPrompt();
 
