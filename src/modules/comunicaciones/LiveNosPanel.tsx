@@ -30,6 +30,7 @@ import {
   ComposerIconButton,
   ConversationCard,
   HeaderButton,
+  InboxList,
   MessageStatusIcon,
   StatusPill,
   getNotaVisual
@@ -3086,51 +3087,11 @@ function handleMicButtonClick() {
                 Abrir NIA
               </button>
             </section>
-
-            <section className="min-h-0 flex-1 overflow-auto rounded-[26px] border border-black/10 bg-white/80 p-3 shadow-sm">
-              <div className="mb-3 px-1 text-[11px] font-black uppercase tracking-[0.14em] text-[#64748b]">
-                Bandejas
-              </div>
-
-              <div className="space-y-1.5">
-                {INBOXES.map((inbox) => (
-                  <button
-                    key={inbox.id}
-                    type="button"
-                    onClick={() => setActiveInbox(inbox.id)}
-                    className={[
-                      "flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left transition",
-                      activeInbox === inbox.id
-                        ? "bg-[#4f7c90] text-white shadow-sm"
-                        : "text-[#475569] hover:bg-[#eef6f7] hover:text-[#142033]"
-                    ].join(" ")}
-                  >
-                    <span className="shrink-0">{inbox.icon}</span>
-
-                    <span className="min-w-0 flex-1">
-                      <span className="block text-xs font-black">{inbox.label}</span>
-                      <span
-                        className={[
-                          "block truncate text-[10px] font-bold",
-                          activeInbox === inbox.id ? "text-white/75" : "text-[#94a3b8]"
-                        ].join(" ")}
-                      >
-                        {inbox.description}
-                      </span>
-                    </span>
-
-                    <span
-                      className={[
-                        "flex h-6 min-w-6 items-center justify-center rounded-full px-1 text-[10px] font-black",
-                        activeInbox === inbox.id ? "bg-white/20 text-white" : "bg-[#eef2f7] text-[#475569]"
-                      ].join(" ")}
-                    >
-                      {inboxCounts[inbox.id] || 0}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </section>
+<InboxList
+  activeInbox={activeInbox}
+  inboxCounts={inboxCounts}
+  onChangeInbox={setActiveInbox}
+/>
 
             <section className="shrink-0 rounded-[26px] border border-black/10 bg-white/80 p-3 shadow-sm">
               <div className="mb-3 px-1 text-[11px] font-black uppercase tracking-[0.14em] text-[#64748b]">
