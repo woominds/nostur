@@ -31,7 +31,7 @@ import { DocumentosPanel } from "./documentos/DocumentosPanel";
 import { ColaborativoPanel } from "./colaborativo/ColaborativoPanel";
 import { TableroControlPanel } from "./dashboard/TableroControlPanel";
 import { ImportadorCatalogosPanel } from "./config/ImportadorCatalogosPanel";
-import { ConfiguracionIAsPanel } from "./configuracion/ConfiguracionIAsPanel";
+
 
 import { LiveNosPanel } from "../modules/comunicaciones/LiveNosPanel";
 import { OportunidadesPanel } from "../modules/comunicaciones/OportunidadesPanel";
@@ -157,7 +157,7 @@ export function Shell() {
   const isColaborativo = activeUrl === "internal://colaborativo";
   const isTableroControl = activeUrl === "internal://tablero-control";
   const isImportadorCatalogos = activeUrl === "internal://importador-catalogos";
-  const isConfiguracionIAs = activeUrl === "internal://configuracion-ias";
+ 
 
   const isLiveNos = activeUrl === "internal://livenos";
   const isOportunidades = activeUrl === "internal://oportunidades";
@@ -233,8 +233,6 @@ export function Shell() {
               <TableroControlPanel />
             ) : isImportadorCatalogos ? (
               <ImportadorCatalogosPanel />
-            ) : isConfiguracionIAs ? (
-              <ConfiguracionIAsPanel />
             ) : (
               <WebviewArea />
             )}

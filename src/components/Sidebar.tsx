@@ -1,7 +1,7 @@
 import {
   HomeIcon,
   LogOut,
-  PencilLine,
+
   Settings,
   Star
 } from "lucide-react";
@@ -91,16 +91,7 @@ export function Sidebar() {
     });
   }
 
-  function openInternal(appId: string) {
-    const app = getAppById(appId);
-
-    createTab({
-      appId: app.id,
-      url: app.url,
-      title: app.name,
-      activate: true
-    });
-  }
+  
 
   function openExternal(appId: string) {
     const app = getAppById(appId);
@@ -116,7 +107,7 @@ export function Sidebar() {
   const isHomeActive = activeUrl === "nostur://home" && homeViewMode === "apps";
   const isFavoritesActive = activeUrl === "nostur://home" && homeViewMode === "favorites";
   const isSettingsActive = activeUrl === "nostur://home" && homeViewMode === "settings";
-  const isConfigIAsActive = activeUrl === "internal://configuracion-ias";
+ 
   const isChatGptActive = activeTab?.appId === "chatgpt" || activeUrl.includes("chatgpt.com");
 
   return (
@@ -145,13 +136,7 @@ export function Sidebar() {
           icon={<Star size={17} strokeWidth={1.8} />}
         />
 
-        <SidebarButton
-          label="Config. IAs"
-          active={isConfigIAsActive}
-          onClick={() => openInternal("configuracion-ias")}
-          icon={<PencilLine size={17} strokeWidth={1.8} />}
-        />
-
+       
         <SidebarButton
           label="ChatGPT"
           active={isChatGptActive}

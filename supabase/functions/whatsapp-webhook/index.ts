@@ -102,6 +102,83 @@ function getSupabaseAdmin() {
   });
 }
 
+function getEnvSupabaseUrl() {
+  const value = Deno.env.get("SUPABASE_URL");
+
+  if (!value) {
+    throw new Error("Falta SUPABASE_URL.");
+  }
+
+  return value;
+}
+
+function getEnvServiceRoleKey() {
+  const value =
+    Deno.env.get("NOSTUR_SERVICE_ROLE_KEY") ||
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+
+  if (!value) {
+    throw new Error("Falta NOSTUR_SERVICE_ROLE_KEY o SUPABASE_SERVICE_ROLE_KEY.");
+  }
+
+  return value;
+}
+
+function fireAndForgetCandeReply(params: {
+  conversationId?: string | null;
+  inboundMessageId?: string | null;
+  oportunidadId?: string | null;
+  source?: string;
+}) {
+  const conversationId = String(params.conversationId || "").trim();
+
+  if (!conversationId) {
+    console.warn("[whatsapp-webhook] CANDE no se dispara: falta conversationId.");
+    return;
+  }
+
+  const supabaseUrl = getEnvSupabaseUrl();
+  const serviceRoleKey = getEnvServiceRoleKey();
+
+  const body = {
+    conversation_id: conversationId,
+    conversacion_id: conversationId,
+    inbound_message_id: params.inboundMessageId || null,
+    mensaje_id: params.inboundMessageId || null,
+    oportunidad_id: params.oportunidadId || null,
+    source: params.source || "whatsapp-webhook"
+  };
+
+  EdgeRuntime.waitUntil(
+    fetch(`${supabaseUrl}/functions/v1/cande-reply`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${serviceRoleKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    })
+      .then(async (response) => {
+        let data: any = null;
+
+        try {
+          data = await response.json();
+        } catch {
+          data = null;
+        }
+
+        console.log("[whatsapp-webhook] cande-reply result", {
+          status: response.status,
+          ok: response.ok,
+          data
+        });
+      })
+      .catch((error) => {
+        console.error("[whatsapp-webhook] cande-reply error", error?.message || error);
+      })
+  );
+}
+
 function getMetaConfig() {
   const token =
     Deno.env.get("WHATSAPP_ACCESS_TOKEN") ||
@@ -954,6 +1031,25 @@ serve(async (req) => {
               contactName,
               phoneNumberId
             });
+            if (result?.conversationId || result?.conversation_id || result?.conversacion_id) {
+  fireAndForgetCandeReply({
+    conversationId:
+      result.conversationId ||
+      result.conversation_id ||
+      result.conversacion_id,
+    inboundMessageId:
+      result.messageId ||
+      result.message_id ||
+      result.mensaje_id ||
+      result.inboundMessageId ||
+      null,
+    oportunidadId:
+      result.oportunidadId ||
+      result.oportunidad_id ||
+      null,
+    source: "whatsapp-webhook"
+  });
+}
 
             results.push({
               type: "message",
@@ -978,6 +1074,8 @@ serve(async (req) => {
               id: message?.id || null,
               error: error?.message || String(error)
             });
+
+            
           }
         }
       }

@@ -337,15 +337,7 @@ export const appRegistry: RegisteredApp[] = [
     color: "#4f7c90",
     category: "crm"
   },
-  {
-    id: "configuracion-ias",
-    name: "Config. IAs",
-    url: "internal://configuracion-ias",
-    homeUrl: "internal://configuracion-ias",
-    partition: "persist:internal",
-    color: "#7c3aed",
-    category: "ai"
-  },
+ 
   {
     id: "importador-catalogos",
     name: "Importador Catálogos",
