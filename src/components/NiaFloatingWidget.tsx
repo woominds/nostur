@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Bot, Mic, Send, Sparkles, ThumbsDown, ThumbsUp, X } from "lucide-react";
+import { supabase } from "../lib/supabase";
 
 type NiaFloatingWidgetProps = {
   activeUrl: string;
@@ -132,8 +133,9 @@ function getInitialMessages(context: NiaContext | null): ChatMessage[] {
 export function NiaFloatingWidget({ activeUrl }: NiaFloatingWidgetProps) {
   const [open, setOpen] = useState(false);
   const [context, setContext] = useState<NiaContext | null>(null);
-  const [input, setInput] = useState("");
-  const [messages, setMessages] = useState<ChatMessage[]>(() => getInitialMessages(null));
+ const [input, setInput] = useState("");
+const [sending, setSending] = useState(false);
+const [messages, setMessages] = useState<ChatMessage[]>(() => getInitialMessages(null));
 
   const visible = useMemo(() => {
     if (!isInternalUrl(activeUrl)) return false;
@@ -168,33 +170,59 @@ export function NiaFloatingWidget({ activeUrl }: NiaFloatingWidgetProps) {
     setOpen(false);
   }
 
-  function handleSend() {
-    const clean = input.trim();
+ async function handleSend() {
+  const clean = input.trim();
 
-    if (!clean) return;
+  if (!clean || sending) return;
 
-    const userMessage: ChatMessage = {
+  const activeContext = context;
+
+  const userMessage: ChatMessage = {
+    id: crypto.randomUUID(),
+    direction: "user",
+    text: clean
+  };
+
+  setMessages((current) => [...current, userMessage]);
+  setInput("");
+  setSending(true);
+
+  try {
+    const { data, error } = await supabase.functions.invoke("nia-chat", {
+      body: {
+        message: clean,
+        context: activeContext,
+        conversation_id: getNiaConversationId(activeContext),
+        conversacion_id: getNiaConversationId(activeContext),
+        source: "nia_floating_widget"
+      }
+    });
+
+    const assistantMessage: ChatMessage = {
       id: crypto.randomUUID(),
-      direction: "user",
-      text: clean
+      direction: "assistant",
+      text:
+        error?.message ||
+        data?.text ||
+        data?.error ||
+        "NIA no pudo responder en este momento.",
+      tool: data?.tool || (getNiaConversationId(activeContext) ? "nia_livenos_context" : "nia_chat")
     };
 
-  const hasConversationContext = Boolean(getNiaConversationId(context));
+    setMessages((current) => [...current, assistantMessage]);
+  } catch (err) {
+    const assistantMessage: ChatMessage = {
+      id: crypto.randomUUID(),
+      direction: "assistant",
+      text: err instanceof Error ? err.message : "No se pudo conectar con NIA.",
+      tool: "nia_error"
+    };
 
-const assistantMessage: ChatMessage = {
-  id: crypto.randomUUID(),
-  direction: "assistant",
-  text: hasConversationContext
-    ? `Recibido. Voy a trabajar sobre este contexto de LiveNos:\n\n${buildNiaContextSummary(
-        context
-      )}\n\nPedido del vendedor:\n"${clean}"\n\nEn el próximo paso conectamos este chat a la función real de NIA para que pueda leer mensajes completos, resumir, sugerir respuesta y ejecutar acciones internas.`
-    : `Recibido.\n\nPedido:\n"${clean}"\n\nEn el próximo paso conectamos este chat con la función real de NIA para leer datos del sistema y ejecutar acciones internas.`,
-  tool: hasConversationContext ? "contexto_livenos" : "chat_nia"
-};
-
-    setMessages((current) => [...current, userMessage, assistantMessage]);
-    setInput("");
+    setMessages((current) => [...current, assistantMessage]);
+  } finally {
+    setSending(false);
   }
+}
 
   useEffect(() => {
     function handleOpenNiaChat(event: Event) {
@@ -363,11 +391,15 @@ const assistantMessage: ChatMessage = {
                 <button
                   type="button"
                   onClick={handleSend}
-                  disabled={!input.trim()}
+disabled={!input.trim() || sending}
                   className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-[#8b2cff] text-white shadow-sm transition hover:bg-[#7c3aed] disabled:opacity-50"
                   title="Enviar"
                 >
-                  <Send size={17} />
+                {sending ? (
+  <Sparkles size={17} className="animate-pulse" />
+) : (
+  <Send size={17} />
+)}
                 </button>
               </div>
             </footer>
