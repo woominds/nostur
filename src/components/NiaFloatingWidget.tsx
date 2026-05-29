@@ -58,6 +58,71 @@ function isInternalUrl(activeUrl: string): boolean {
   return activeUrl.startsWith("internal://");
 }
 
+function getDefaultContextFromActiveUrl(activeUrl: string): NiaContext {
+  const now = new Date().toISOString();
+
+  if (activeUrl.includes("livenos") || activeUrl.includes("comunicaciones")) {
+    return {
+      source: "livenos",
+      module: "comunicaciones",
+      action: "open_nia_from_livenos_without_selected_conversation",
+      created_at: now
+    };
+  }
+
+  if (activeUrl.includes("control") || activeUrl.includes("tablero")) {
+    return {
+      source: "tablero",
+      module: "control_comercial",
+      action: "open_nia_from_dashboard",
+      created_at: now
+    };
+  }
+
+  if (activeUrl.includes("oportunidades")) {
+    return {
+      source: "oportunidades",
+      module: "oportunidades",
+      action: "open_nia_from_opportunities",
+      created_at: now
+    };
+  }
+
+  if (activeUrl.includes("contactos")) {
+    return {
+      source: "contactos",
+      module: "contactos",
+      action: "open_nia_from_contacts",
+      created_at: now
+    };
+  }
+
+  if (activeUrl.includes("clientes")) {
+    return {
+      source: "clientes",
+      module: "clientes",
+      action: "open_nia_from_clients",
+      created_at: now
+    };
+  }
+
+  if (activeUrl.includes("carritos")) {
+    return {
+      source: "carritos",
+      module: "carritos",
+      action: "open_nia_from_carritos",
+      created_at: now
+    };
+  }
+
+  return {
+    source: "general",
+    module: "general",
+    action: "open_nia_general",
+    created_at: now
+  };
+}
+
 function getNiaConversationId(context: NiaContext | null): string | null {
   return context?.conversation_id || context?.conversacion_id || null;
 }
@@ -121,13 +186,16 @@ function getInitialMessages(context: NiaContext | null): ChatMessage[] {
     ];
   }
 
-  return [
-    {
-      id: crypto.randomUUID(),
-      direction: "assistant",
-      text: "Hola, soy NIA. Puedo ayudarte con oportunidades, conversaciones, reportes, alertas comerciales y acciones internas."
-    }
-  ];
+ return [
+  {
+    id: crypto.randomUUID(),
+    direction: "assistant",
+    text:
+      context?.module && context.module !== "general"
+        ? `Estoy parada en el módulo ${context.module}.\n\nPodés pedirme un resumen, alertas, diagnóstico comercial o próximas acciones según esta pantalla.`
+        : "Hola, soy NIA. Puedo ayudarte con oportunidades, conversaciones, reportes, alertas comerciales y acciones internas."
+  }
+];
 }
 
 export function NiaFloatingWidget({ activeUrl }: NiaFloatingWidgetProps) {
@@ -161,10 +229,34 @@ const [messages, setMessages] = useState<ChatMessage[]>(() => getInitialMessages
     }
   }
 
-  function openChat() {
-    readContextFromStorage();
-    setOpen(true);
+ function openChat() {
+  const screenContext = getDefaultContextFromActiveUrl(activeUrl);
+
+  const raw = window.localStorage.getItem("nostur_nia_context");
+
+  if (raw) {
+    try {
+      const stored = JSON.parse(raw) as NiaContext;
+
+      const storedHasConversation = Boolean(getNiaConversationId(stored));
+      const isStillLiveNos =
+        activeUrl.includes("livenos") || activeUrl.includes("comunicaciones");
+
+      if (storedHasConversation && isStillLiveNos) {
+        setContext(stored);
+        setMessages(getInitialMessages(stored));
+        setOpen(true);
+        return;
+      }
+    } catch {
+      // Si el contexto guardado está roto, seguimos con contexto de pantalla.
+    }
   }
+
+  setContext(screenContext);
+  setMessages(getInitialMessages(screenContext));
+  setOpen(true);
+}
 
   function closeChat() {
     setOpen(false);
@@ -175,18 +267,23 @@ const [messages, setMessages] = useState<ChatMessage[]>(() => getInitialMessages
 
   if (!clean || sending) return;
 
-let activeContext = context;
+let activeContext = context || getDefaultContextFromActiveUrl(activeUrl);
 
 try {
   const rawContext = window.localStorage.getItem("nostur_nia_context");
+  const isLiveNosScreen =
+    activeUrl.includes("livenos") || activeUrl.includes("comunicaciones");
 
-  if (rawContext) {
+  if (rawContext && isLiveNosScreen) {
     const parsedContext = JSON.parse(rawContext) as NiaContext;
-    activeContext = parsedContext;
-    setContext(parsedContext);
+
+    if (getNiaConversationId(parsedContext)) {
+      activeContext = parsedContext;
+      setContext(parsedContext);
+    }
   }
 } catch {
-  activeContext = context;
+  activeContext = context || getDefaultContextFromActiveUrl(activeUrl);
 }
   const userMessage: ChatMessage = {
     id: crypto.randomUUID(),
@@ -330,18 +427,32 @@ function handleNiaContextUpdated(event: Event) {
                 ✨ Pedile a NIA un resumen de tus oportunidades
               </div>
 
-            {getNiaConversationId(context) ? (
+       {context ? (
   <div className="mt-2 rounded-2xl border border-purple-100 bg-purple-50 px-3 py-2 text-xs font-bold text-[#5b21b6]">
-    <div className="font-black">
-      Contexto activo: {getNiaPassengerName(context)}
-    </div>
+    {getNiaConversationId(context) ? (
+      <>
+        <div className="font-black">
+          Contexto activo: {getNiaPassengerName(context)}
+        </div>
 
-    <div className="mt-1 text-[11px] leading-relaxed text-[#6d28d9]">
-      WhatsApp: {context?.wa_phone || "—"} · Score:{" "}
-      {context?.oportunidad_score ?? "—"} · CANDE:{" "}
-      {context?.cande_activa ? "activa" : "pausada"} · 24h:{" "}
-      {context?.ventana_24h_abierta ? "abierta" : "cerrada"}
-    </div>
+        <div className="mt-1 text-[11px] leading-relaxed text-[#6d28d9]">
+          WhatsApp: {context?.wa_phone || "—"} · Score:{" "}
+          {context?.oportunidad_score ?? "—"} · CANDE:{" "}
+          {context?.cande_activa ? "activa" : "pausada"} · 24h:{" "}
+          {context?.ventana_24h_abierta ? "abierta" : "cerrada"}
+        </div>
+      </>
+    ) : (
+      <>
+        <div className="font-black">
+          Contexto activo: {context.module || "general"}
+        </div>
+
+        <div className="mt-1 text-[11px] leading-relaxed text-[#6d28d9]">
+          NIA está parada en esta pantalla, sin conversación puntual seleccionada.
+        </div>
+      </>
+    )}
   </div>
 ) : null}
             </div>
