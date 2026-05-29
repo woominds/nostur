@@ -33,466 +33,50 @@ import {
   StatusPill,
   getNotaVisual
 } from "./liveNos/ui";
+import type {
+  ContactoWa,
+  Conversacion,
+  ConversationVM,
+  InboxKey,
+  LeadOportunidad,
+  Mensaje,
+  MensajeReaccion,
+  NotaConversacion,
+  PendingAttachment,
+  PipelineEstado,
+  PreviewMedia,
+  ProfileLite,
+  RespuestaRapida,
+  RightTab,
+  TimelineItem,
+  WhatsappTemplate
+} from "./liveNos/types";
+import {
+  canSendAsWhatsappAudio,
+  filterByInbox,
+  formatDateTime,
+  formatFileSize,
+  getAudioExtension,
+  getCleanAudioMimeForMeta,
+  getDato,
+  getDisplayName,
+  getInitials,
+  getMessageMediaMime,
+  getMessageMediaName,
+  getMessageMediaSize,
+  getMessageMediaUrl,
+  getMessageRole,
+  getMessageSenderName,
+  getRecorderMimeType,
+  getVendedorName,
+  getWindowRemainingLabel,
+  isAudioMessage,
+  isImageMessage,
+  isWindowOpen,
+  normalizePhoneForLiveNos,
+  normalizePhoneWithPlus
+} from "./liveNos/helpers";
 
-type InboxKey =
-  | "sin_atender"
-  | "en_gestion"
-  | "cande"
-  | "colaboracion"
-  | "cerradas"
-  | "archivadas"
-  | "eliminadas";
-
-type RightTab = "info" | "tareas" | "historial";
-
-type ContactoWa = {
-  id: string;
-  wa_phone: string;
-  display_name: string | null;
-  profile_name: string | null;
-  avatar_url: string | null;
-};
-
-type ProfileLite = {
-  id: string;
-  nombre: string;
-  apellido: string;
-  email: string;
-  color: string;
-  activo: boolean;
-  nombre_publico_whatsapp: string | null;
-  mostrar_nombre_agente?: boolean | null;
-};
-
-type Conversacion = {
-  id: string;
-  contacto_id: string;
-  assigned_to: string | null;
-  sucursal_id: string | null;
-  inbox: string;
-  status: string;
-  priority: number;
-  unread_count: number;
-  last_message_at: string | null;
-  last_message_preview: string | null;
-  window_expires_at: string | null;
-  wa_phone: string;
-  created_at: string;
-  updated_at: string;
-  last_inbound_message_at: string | null;
-  last_outbound_message_at: string | null;
-  whatsapp_24h_expires_at: string | null;
-  archived_at: string | null;
-  deleted_at: string | null;
-  closed_at: string | null;
-  estado_gestion: string;
-  estado_comercial: string;
-  categoria: string | null;
-  etapa_comercial: string | null;
-  subject: string | null;
-  titulo: string | null;
-  channel: string;
-  metadata: Record<string, unknown>;
-  tomada_at: string | null;
-  tomada_by: string | null;
-};
-
-type Mensaje = {
-  id: string;
-  conversacion_id: string;
-  direction: string;
-  type: string;
-  text: string | null;
-  media: Record<string, unknown> | null;
-  reply_to_id?: string | null;
-  forwarded?: boolean | null;
-  status: string;
-  error: string | null;
-  wa_message_id: string | null;
-  sender_profile_id: string | null;
-  wa_timestamp: string;
-  created_at: string;
-  sender_kind: string;
-};
-
-type LeadOportunidad = {
-  id: string;
-  conversacion_id: string;
-  estado_id: string;
-  score: number;
-  datos: Record<string, unknown>;
-  assigned_to: string | null;
-  cande_activa: boolean;
-  transferida_at: string | null;
-  last_score_at: string;
-  created_at: string;
-  updated_at: string;
-  cande_handoff_requested_at: string | null;
-};
-
-type PipelineEstado = {
-  id: string;
-  nombre: string;
-  color: string;
-  orden: number;
-  es_final: boolean;
-  resultado: string | null;
-  es_sin_atender: boolean;
-};
-
-type NotaConversacion = {
-  id: string;
-  conversacion_id: string;
-  autor_id: string;
-  contenido: string;
-  tipo: string;
-  created_at: string;
-  updated_at?: string | null;
-  scheduled_for?: string | null;
-};
-
-type MensajeReaccion = {
-  id: string;
-  mensaje_id: string;
-  autor_id: string | null;
-  emoji: string;
-  created_at: string;
-};
-
-type WhatsappTemplate = {
-  id: string;
-  name: string;
-  display_name: string;
-  language: string;
-  category: string | null;
-  body: string;
-  variables: string[];
-  components?: unknown[];
-  meta_id?: string | null;
-  meta_status: string | null;
-  active: boolean;
-  last_synced_at?: string | null;
-};
-
-type PendingAttachment = {
-  file: File;
-  previewUrl: string | null;
-  kind: "image" | "document" | "audio";
-};
-
-type PreviewMedia = {
-  url: string;
-  name: string;
-  mime: string;
-  type: "image" | "file" | "audio";
-};
-
-type RespuestaRapida = {
-  id: string;
-  titulo: string;
-  contenido: string;
-  categoria: string | null;
-  atajo: string | null;
-  activa: boolean;
-  orden: number;
-  created_at: string;
-  updated_at: string;
-  created_by: string | null;
-};
-
-type ConversationVM = Conversacion & {
-  contacto?: ContactoWa | null;
-  vendedor?: ProfileLite | null;
-  oportunidad?: LeadOportunidad | null;
-};
-
-type TimelineItem =
-  | {
-      id: string;
-      kind: "message";
-      at: string;
-      message: Mensaje;
-    }
-  | {
-      id: string;
-      kind: "internal";
-      at: string;
-      nota: NotaConversacion;
-    };
-
-
-
-function formatDateTime(value?: string | null): string {
-  if (!value) return "—";
-
-  try {
-    return new Intl.DateTimeFormat("es-AR", {
-      day: "2-digit",
-      month: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit"
-    }).format(new Date(value));
-  } catch {
-    return "—";
-  }
-}
-
-function getDisplayName(contacto?: ContactoWa | null, conv?: Conversacion | null): string {
-  return (
-    contacto?.display_name ||
-    contacto?.profile_name ||
-    conv?.titulo ||
-    conv?.subject ||
-    conv?.wa_phone ||
-    "Pasajero"
-  );
-}
-
-function getInitials(value: string): string {
-  const clean = value.trim();
-
-  if (!clean) return "P";
-
-  const parts = clean.split(" ").filter(Boolean);
-
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-
-  return `${parts[0].slice(0, 1)}${parts[1].slice(0, 1)}`.toUpperCase();
-}
-
-function getVendedorName(profile?: ProfileLite | null): string {
-  if (!profile) return "Sin asignar";
-  return `${profile.nombre} ${profile.apellido}`.trim();
-}
-
-function getMessageSenderName(message: Mensaje, profiles: ProfileLite[]): string {
-  const profile = profiles.find((item) => item.id === message.sender_profile_id);
-
-  if (!profile) return "NOSSIX";
-
-  return profile.nombre_publico_whatsapp || getVendedorName(profile);
-}
-
-function getDato(datos: Record<string, unknown> | null | undefined, key: string): string {
-  const value = datos?.[key];
-
-  if (value === null || value === undefined) return "—";
-  if (typeof value === "string") return value || "—";
-
-  return String(value);
-}
-
-function normalizePhoneForLiveNos(value: string): string {
-  let phone = String(value || "").trim();
-
-  phone = phone.replace(/[^\d+]/g, "");
-
-  if (!phone) return "";
-
-  if (phone.startsWith("+")) return phone.replace("+", "");
-
-  if (phone.startsWith("549")) return phone;
-
-  if (phone.startsWith("54")) {
-    const rest = phone.slice(2);
-    return rest.startsWith("9") ? phone : `549${rest}`;
-  }
-
-  if (phone.startsWith("9")) return `54${phone}`;
-
-  return `549${phone}`;
-}
-
-function normalizePhoneWithPlus(value: string): string {
-  const digits = normalizePhoneForLiveNos(value);
-  return digits ? `+${digits}` : "";
-}
-
-function isWindowOpen(conv?: Conversacion | null): boolean {
-  const value = conv?.whatsapp_24h_expires_at || conv?.window_expires_at;
-
-  if (!value) return false;
-
-  return new Date(value).getTime() > Date.now();
-}
-
-function getWindowRemainingLabel(conv?: Conversacion | null): string {
-  const value = conv?.whatsapp_24h_expires_at || conv?.window_expires_at;
-
-  if (!value) return "Ventana cerrada";
-
-  const diff = new Date(value).getTime() - Date.now();
-
-  if (diff <= 0) return "Ventana cerrada";
-
-  const hours = Math.floor(diff / 3600000);
-  const minutes = Math.floor((diff % 3600000) / 60000);
-
-  if (hours <= 0) return `Ventana 24h · vence en ${minutes}m`;
-
-  return `Ventana 24h · vence en ${hours}h`;
-}
-
-function filterByInbox(conv: ConversationVM, inbox: InboxKey): boolean {
-  if (inbox === "eliminadas") return Boolean(conv.deleted_at);
-  if (inbox === "archivadas") return Boolean(conv.archived_at) && !conv.deleted_at;
-  if (inbox === "cerradas") return Boolean(conv.closed_at) && !conv.deleted_at;
-
-  if (conv.deleted_at || conv.archived_at || conv.closed_at) return false;
-
-  if (inbox === "sin_atender") {
-    return !conv.assigned_to || conv.estado_gestion === "sin_atender";
-  }
-
-  if (inbox === "en_gestion") {
-    return Boolean(conv.assigned_to) || conv.estado_gestion === "en_gestion";
-  }
-
-  if (inbox === "cande") {
-    return Boolean(conv.oportunidad?.cande_activa);
-  }
-
-  if (inbox === "colaboracion") {
-    return conv.inbox === "colaboracion" || conv.estado_gestion === "colaboracion";
-  }
-
-  return true;
-}
-
-
-function getMessageRole(message: Mensaje): "passenger" | "agent" | "cande" | "nia" | "system" {
-  const sender = String(message.sender_kind || "").toLowerCase();
-  const type = String(message.type || "").toLowerCase();
-
-  if (sender === "cande") return "cande";
-  if (sender === "nia") return "nia";
-  if (sender === "sistema" || type === "system") return "system";
-
-  if (message.direction === "in" || message.direction === "inbound") return "passenger";
-
-  return "agent";
-}
-
-function getMessageMediaUrl(message: Mensaje): string | null {
-  const media = message.media || {};
-
-  const url = String(
-    media.url ||
-      media.media_url ||
-      media.publicUrl ||
-      media.public_url ||
-      media.download_url ||
-      ""
-  ).trim();
-
-  return url || null;
-}
-
-function getMessageMediaName(message: Mensaje): string {
-  const media = message.media || {};
-
-  return (
-    String(media.filename || "").trim() ||
-    String(media.name || "").trim() ||
-    String(media.media_filename || "").trim() ||
-    String(media.original_name || "").trim() ||
-    "archivo"
-  );
-}
-
-function getMessageMediaMime(message: Mensaje): string {
-  const media = message.media || {};
-
-  return String(
-    media.mime_type ||
-      media.mimeType ||
-      media.media_mime_type ||
-      media.content_type ||
-      ""
-  ).trim();
-}
-
-function getMessageMediaSize(message: Mensaje): number | null {
-  const media = message.media || {};
-  const raw = media.size || media.media_size || media.file_size;
-
-  const parsed = Number(raw);
-
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-}
-
-function formatFileSize(size?: number | null): string {
-  if (!size) return "";
-
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
-
-  return `${(size / 1024 / 1024).toFixed(2)} MB`;
-}
-
-function isImageMessage(message: Mensaje): boolean {
-  const mime = getMessageMediaMime(message).toLowerCase();
-  const type = String(message.type || "").toLowerCase();
-
-  return type === "image" || mime.startsWith("image/");
-}
-
-function isAudioMessage(message: Mensaje): boolean {
-  const mime = getMessageMediaMime(message).toLowerCase();
-  const type = String(message.type || "").toLowerCase();
-
-  return type === "audio" || mime.startsWith("audio/");
-}
-
-function getRecorderMimeType(): string {
-  if (typeof MediaRecorder === "undefined") return "";
-
-  // WhatsApp Cloud API acepta audio/ogg con codec opus como audio real.
-  // NO usamos webm porque Meta lo rechaza como audio.
-  const candidates = [
-    "audio/ogg;codecs=opus",
-    "audio/ogg"
-  ];
-
-  return candidates.find((mimeType) => MediaRecorder.isTypeSupported(mimeType)) || "";
-}
-
-function getAudioExtension(mimeType: string): string {
-  const clean = mimeType.toLowerCase();
-
-  if (clean.includes("ogg")) return "ogg";
-  if (clean.includes("mpeg") || clean.includes("mp3")) return "mp3";
-  if (clean.includes("mp4") || clean.includes("m4a") || clean.includes("aac")) return "m4a";
-  if (clean.includes("amr")) return "amr";
-
-  return "ogg";
-}
-
-function getCleanAudioMimeForMeta(mimeType: string): string {
-  const clean = mimeType.toLowerCase();
-
-  if (clean.includes("ogg")) return "audio/ogg";
-  if (clean.includes("mpeg") || clean.includes("mp3")) return "audio/mpeg";
-  if (clean.includes("mp4") || clean.includes("m4a")) return "audio/mp4";
-  if (clean.includes("aac")) return "audio/aac";
-  if (clean.includes("amr")) return "audio/amr";
-
-  return "audio/ogg";
-}
-
-function canSendAsWhatsappAudio(mimeType: string): boolean {
-  const clean = mimeType.toLowerCase();
-
-  return (
-    clean.includes("ogg") ||
-    clean.includes("mpeg") ||
-    clean.includes("mp3") ||
-    clean.includes("mp4") ||
-    clean.includes("m4a") ||
-    clean.includes("aac") ||
-    clean.includes("amr")
-  ) && !clean.includes("webm");
-}
 
 
 export function LiveNosPanel() {
