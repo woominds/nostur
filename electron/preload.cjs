@@ -7,6 +7,9 @@ contextBridge.exposeInMainWorld("nostur", {
 
   notify: (payload) => ipcRenderer.invoke("nostur:notify", payload),
 
+  playNotificationSound: (payload) =>
+    ipcRenderer.invoke("nostur:play-notification-sound", payload),
+
   onNewTabFromMain: (callback) => {
     const handler = (_event, payload) => callback(payload);
     ipcRenderer.on("nostur:new-tab-from-main", handler);

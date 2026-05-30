@@ -37,7 +37,7 @@ import { CandePanel } from "../modules/comunicaciones/CandePanel";
 import { NiaPanel } from "../modules/comunicaciones/NiaPanel";
 import { ControlIaPanel } from "../modules/comunicaciones/ControlIaPanel";
 import { NiaFloatingWidget } from "./NiaFloatingWidget";
-import { LiveNosNotificationsProvider } from "./LiveNosNotificationsProvider";
+import { GlobalWhatsappNotifications } from "./GlobalWhatsappNotifications";
 
 type InternalOpenEventDetail = {
   moduleId?: string;
@@ -132,7 +132,7 @@ export function Shell() {
     const unsubscribe = window.nostur?.onOpenConversationFromNotification?.(({ conversationId }) => {
       if (!conversationId) return;
 
-      window.localStorage.setItem("nostur_livenos_last_notification_click", conversationId);
+      window.localStorage.setItem("nostur_open_livenos_conversation_id", conversationId);
 
       createTab({
         appId: "livenos",
@@ -149,7 +149,7 @@ export function Shell() {
             }
           })
         );
-      }, 450);
+      }, 350);
     });
 
     return () => {
@@ -194,6 +194,8 @@ export function Shell() {
 
   return (
     <div className="h-screen w-screen overflow-hidden bg-[#e9edf4] text-[#1f2937]">
+      <GlobalWhatsappNotifications />
+
       <div className="flex h-screen w-screen overflow-hidden">
         <Sidebar />
 
@@ -265,7 +267,6 @@ export function Shell() {
             )}
 
             <NiaFloatingWidget activeUrl={activeUrl} />
-            <LiveNosNotificationsProvider />
           </div>
         </main>
       </div>

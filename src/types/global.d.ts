@@ -15,6 +15,10 @@ declare global {
         messageId?: string;
       }) => Promise<boolean>;
 
+      playNotificationSound: (payload: {
+        kind: "nuevo" | "gestion" | "cande_transfer";
+      }) => Promise<boolean>;
+
       onNewTabFromMain: (callback: (payload: { url: string }) => void) => () => void;
 
       onOpenConversationFromNotification: (

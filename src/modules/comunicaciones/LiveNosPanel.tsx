@@ -556,6 +556,35 @@ export function LiveNosPanel() {
   }, [selectedId]);
 
   useEffect(() => {
+  function openConversationFromNotification(event: Event) {
+    const customEvent = event as CustomEvent<{ conversationId?: string }>;
+    const conversationId = customEvent.detail?.conversationId;
+
+    if (!conversationId) return;
+
+    setActiveInbox("sin_atender");
+    void selectConversation(conversationId);
+
+    window.localStorage.removeItem("nostur_open_livenos_conversation_id");
+  }
+
+  const pendingConversationId = window.localStorage.getItem("nostur_open_livenos_conversation_id");
+
+  if (pendingConversationId) {
+    window.setTimeout(() => {
+      void selectConversation(pendingConversationId);
+      window.localStorage.removeItem("nostur_open_livenos_conversation_id");
+    }, 400);
+  }
+
+  window.addEventListener("nostur:open-livenos-conversation", openConversationFromNotification);
+
+  return () => {
+    window.removeEventListener("nostur:open-livenos-conversation", openConversationFromNotification);
+  };
+}, []);
+
+  useEffect(() => {
     void loadData();
   }, [loadData]);
 

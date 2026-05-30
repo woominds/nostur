@@ -5,33 +5,78 @@ let mainWindow = null;
 
 const isDev = !app.isPackaged;
 
+function log(...args) {
+  console.log("[NOSTUR MAIN]", ...args);
+}
+
+function warn(...args) {
+  console.warn("[NOSTUR MAIN WARNING]", ...args);
+}
+
+function errorLog(...args) {
+  console.error("[NOSTUR MAIN ERROR]", ...args);
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function sendNewTab(url) {
-  if (!url) return;
-  if (url === "about:blank") return;
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  log("sendNewTab recibido:", url);
+
+  if (!url) {
+    warn("sendNewTab cancelado: url vacía");
+    return;
+  }
+
+  if (url === "about:blank") {
+    warn("sendNewTab cancelado: about:blank");
+    return;
+  }
+
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    warn("sendNewTab cancelado: mainWindow no disponible");
+    return;
+  }
 
   mainWindow.webContents.send("nostur:new-tab-from-main", { url });
 }
 
 function sendOpenConversationFromNotification(conversationId) {
-  if (!conversationId) return;
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  log("sendOpenConversationFromNotification:", conversationId);
+
+  if (!conversationId) {
+    warn("No hay conversationId para abrir desde notificación.");
+    return;
+  }
+
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    warn("No se pudo abrir conversación: mainWindow no disponible.");
+    return;
+  }
 
   if (mainWindow.isMinimized()) {
+    log("Ventana minimizada. Restaurando...");
     mainWindow.restore();
   }
 
+  log("Mostrando y enfocando ventana...");
   mainWindow.show();
   mainWindow.focus();
 
   mainWindow.webContents.send("nostur:open-conversation-from-notification", {
     conversationId
   });
+
+  log("Evento enviado al renderer: nostur:open-conversation-from-notification");
 }
 
 function configureWindowOpenHandling() {
+  log("Configurando manejo de ventanas/navegación...");
+
   app.on("web-contents-created", (_event, contents) => {
     contents.setWindowOpenHandler(({ url }) => {
+      log("setWindowOpenHandler global:", url);
       sendNewTab(url);
       return { action: "deny" };
     });
@@ -48,12 +93,15 @@ function configureWindowOpenHandling() {
         return;
       }
 
+      log("will-navigate interceptado:", url);
       event.preventDefault();
       sendNewTab(url);
     });
 
     contents.on("did-create-window", (childWindow, details) => {
       const url = details?.url;
+
+      log("did-create-window interceptado:", url);
 
       if (childWindow && !childWindow.isDestroyed()) {
         childWindow.close();
@@ -65,6 +113,9 @@ function configureWindowOpenHandling() {
 }
 
 function createWindow() {
+  log("Creando ventana principal...");
+  log("isDev:", isDev);
+
   const primaryDisplay = screen.getPrimaryDisplay();
   const workArea = primaryDisplay.workArea;
 
@@ -98,19 +149,71 @@ function createWindow() {
     }
   });
 
+  mainWindow.on("ready-to-show", () => {
+    log("mainWindow ready-to-show");
+  });
+
+  mainWindow.on("show", () => {
+    log("mainWindow show");
+  });
+
+  mainWindow.on("focus", () => {
+    log("mainWindow focus");
+  });
+
+  mainWindow.on("minimize", () => {
+    log("mainWindow minimized");
+  });
+
+  mainWindow.on("restore", () => {
+    log("mainWindow restored");
+  });
+
+  mainWindow.on("closed", () => {
+    log("mainWindow closed");
+    mainWindow = null;
+  });
+
+  mainWindow.webContents.on("did-finish-load", () => {
+    log("Renderer terminó de cargar.");
+  });
+
+  mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
+    errorLog("Renderer falló al cargar:", {
+      errorCode,
+      errorDescription,
+      validatedURL
+    });
+  });
+
+  mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+    console.log("[RENDERER CONSOLE]", {
+      level,
+      message,
+      line,
+      sourceId
+    });
+  });
+
   if (isDev) {
+    log("Cargando Vite dev server: http://127.0.0.1:5173");
     mainWindow.loadURL("http://127.0.0.1:5173");
   } else {
-    mainWindow.loadFile(path.join(__dirname, "../dist/index.html"));
+    const indexPath = path.join(__dirname, "../dist/index.html");
+    log("Cargando archivo build:", indexPath);
+    mainWindow.loadFile(indexPath);
   }
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    log("setWindowOpenHandler mainWindow:", url);
     sendNewTab(url);
     return { action: "deny" };
   });
 }
 
 function configureSessions() {
+  log("Configurando permisos de sesiones...");
+
   const partitions = [
     "persist:web",
     "persist:experts",
@@ -138,22 +241,39 @@ function configureSessions() {
         "fullscreen"
       ];
 
-      callback(allowed.includes(permission));
+      const isAllowed = allowed.includes(permission);
+
+      log("Permiso solicitado:", {
+        partitionName,
+        permission,
+        isAllowed
+      });
+
+      callback(isAllowed);
     });
 
     ses.on("will-download", (_event, item) => {
+      log("Descarga iniciada:", item.getFilename());
+
       item.once("done", (_doneEvent, state) => {
-        if (state === "completed") {
-          console.log("Download completed:", item.getSavePath());
-        }
+        log("Descarga finalizada:", {
+          filename: item.getFilename(),
+          state,
+          path: item.getSavePath()
+        });
       });
     });
   }
 }
 
 app.whenReady().then(() => {
+  log("Electron app ready.");
+  log("platform:", process.platform);
+  log("Notification.isSupported():", Notification.isSupported());
+
   if (process.platform === "win32") {
     app.setAppUserModelId("com.nossix.nostur");
+    log("AppUserModelId configurado para Windows.");
   }
 
   configureWindowOpenHandling();
@@ -161,6 +281,8 @@ app.whenReady().then(() => {
   createWindow();
 
   app.on("activate", () => {
+    log("app activate");
+
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
     }
@@ -168,12 +290,16 @@ app.whenReady().then(() => {
 });
 
 app.on("window-all-closed", () => {
+  log("window-all-closed");
+
   if (process.platform !== "darwin") {
     app.quit();
   }
 });
 
 ipcMain.handle("nostur:clear-cache", async (_event, partitionName) => {
+  log("IPC nostur:clear-cache recibido:", partitionName);
+
   const ses = session.fromPartition(partitionName || "persist:web");
 
   await ses.clearCache();
@@ -191,37 +317,126 @@ ipcMain.handle("nostur:clear-cache", async (_event, partitionName) => {
     ]
   });
 
+  log("Cache limpiada:", partitionName || "persist:web");
+
   return true;
 });
 
 ipcMain.handle("nostur:open-external", async (_event, url) => {
-  if (!url) return false;
+  log("IPC nostur:open-external recibido:", url);
+
+  if (!url) {
+    warn("openExternal cancelado: url vacía");
+    return false;
+  }
+
   await shell.openExternal(url);
   return true;
 });
 
 ipcMain.handle("nostur:notify", async (_event, payload) => {
-  if (!payload) return false;
+  log("IPC nostur:notify recibido:", payload);
+
+  if (!payload) {
+    warn("nostur:notify cancelado: payload vacío");
+    return false;
+  }
 
   const title = String(payload.title || "NOSTUR");
   const body = String(payload.body || "Nuevo mensaje");
   const conversationId = payload.conversationId ? String(payload.conversationId) : "";
 
-  if (!Notification.isSupported()) {
+  const supported = Notification.isSupported();
+
+  log("Notification support:", supported);
+
+  if (!supported) {
+    warn("Electron Notification no está soportado en este sistema/contexto.");
     return false;
   }
 
-  const notification = new Notification({
-    title,
-    body,
-    silent: false
+  try {
+    const notification = new Notification({
+      title,
+      body,
+      silent: false
+    });
+
+    notification.on("show", () => {
+      log("Notificación mostrada:", {
+        title,
+        body,
+        conversationId
+      });
+    });
+
+    notification.on("click", () => {
+      log("Click en notificación:", {
+        conversationId
+      });
+
+      sendOpenConversationFromNotification(conversationId);
+    });
+
+    notification.on("close", () => {
+      log("Notificación cerrada:", {
+        conversationId
+      });
+    });
+
+    notification.on("failed", (_event, errorMessage) => {
+      errorLog("Notificación falló:", errorMessage);
+    });
+
+    notification.show();
+
+    log("notification.show() ejecutado.");
+
+    return true;
+  } catch (err) {
+    errorLog("Error creando/mostrando notificación:", err);
+    return false;
+  }
+});
+
+ipcMain.handle("nostur:play-notification-sound", async (_event, payload) => {
+  log("IPC nostur:play-notification-sound recibido:", payload);
+
+  const kind = String(payload?.kind || "gestion");
+
+  let repeats = 1;
+  let gap = 160;
+
+  if (kind === "nuevo") {
+    repeats = 2;
+    gap = 180;
+  }
+
+  if (kind === "cande_transfer") {
+    repeats = 3;
+    gap = 130;
+  }
+
+  log("Reproduciendo beep:", {
+    kind,
+    repeats,
+    gap
   });
 
-  notification.on("click", () => {
-    sendOpenConversationFromNotification(conversationId);
-  });
+  try {
+    for (let index = 0; index < repeats; index += 1) {
+      log(`Beep ${index + 1}/${repeats}`);
+      shell.beep();
 
-  notification.show();
+      if (index < repeats - 1) {
+        await wait(gap);
+      }
+    }
 
-  return true;
+    log("Beep finalizado OK.");
+    return true;
+  } catch (err) {
+    errorLog("Error reproduciendo beep:", err);
+    return false;
+  }
 });
