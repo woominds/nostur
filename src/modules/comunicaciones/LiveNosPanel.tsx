@@ -60,7 +60,6 @@ import {
   formatFileSize,
   getAudioExtension,
   getCleanAudioMimeForMeta,
-  getDato,
   getDisplayName,
   getInitials,
   getMessageMediaMime,
@@ -78,12 +77,61 @@ import {
   normalizePhoneWithPlus
 } from "./liveNos/helpers";
 
+type CandeFeedbackTipo = "positivo" | "negativo" | "correccion";
 
+type CandeFeedbackDraft = {
+  message: Mensaje;
+  tipo: CandeFeedbackTipo;
+};
+
+function getDatoFromKeys(
+  datos: Record<string, unknown> | null | undefined,
+  keys: string[],
+  fallback = "—"
+): string {
+  if (!datos) return fallback;
+
+  for (const key of keys) {
+    const value = datos[key];
+
+    if (value === null || value === undefined) continue;
+
+    if (typeof value === "string") {
+      const text = value.trim();
+      if (text) return text;
+    }
+
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return String(value);
+    }
+
+    if (typeof value === "boolean") {
+      return value ? "Sí" : "No";
+    }
+  }
+
+  return fallback;
+}
+
+function getScoreLabel(score: number): string {
+  if (score >= 75) return "Caliente";
+  if (score >= 45) return "Tibia";
+  return "Fría";
+}
+
+function getScoreTextColor(score: number): string {
+  if (score >= 75) return "text-red-700";
+  if (score >= 45) return "text-amber-700";
+  return "text-slate-600";
+}
 
 export function LiveNosPanel() {
   const [loading, setLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
-  const [activeInbox, setActiveInbox] = useState<InboxKey>("sin_atender");
+
+  // Abre por defecto en EN GESTIÓN
+  const [activeInbox, setActiveInbox] = useState<InboxKey>("en_gestion");
+
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -133,7 +181,11 @@ export function LiveNosPanel() {
   const [rightTab, setRightTab] = useState<RightTab>("info");
   const [openMessageMenuId, setOpenMessageMenuId] = useState<string | null>(null);
 
-  
+  const [candeFeedbackDraft, setCandeFeedbackDraft] = useState<CandeFeedbackDraft | null>(null);
+  const [candeFeedbackMotivo, setCandeFeedbackMotivo] = useState("");
+  const [candeFeedbackCorreccion, setCandeFeedbackCorreccion] = useState("");
+  const [candeFeedbackSaving, setCandeFeedbackSaving] = useState(false);
+
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
 
@@ -196,7 +248,11 @@ export function LiveNosPanel() {
           conv.vendedor?.nombre,
           conv.vendedor?.apellido,
           conv.oportunidad?.datos?.destino,
-          conv.oportunidad?.datos?.origen
+          conv.oportunidad?.datos?.origen,
+          conv.oportunidad?.datos?.origen_sugerido,
+          conv.oportunidad?.datos?.fechas_tentativas,
+          conv.oportunidad?.datos?.cantidad_pasajeros,
+          conv.oportunidad?.datos?.presupuesto_aproximado
         ]
           .filter(Boolean)
           .join(" ")
@@ -293,7 +349,8 @@ export function LiveNosPanel() {
         .includes(clean);
     });
   }, [quickReplies, quickReplySearch]);
-    function scheduleRefreshDetail(conversationId?: string | null) {
+
+  function scheduleRefreshDetail(conversationId?: string | null) {
     const current = conversationId || selectedIdRef.current;
 
     if (!current) return;
@@ -517,18 +574,18 @@ export function LiveNosPanel() {
   }, [selectedId, loadConversationDetail]);
 
   useEffect(() => {
-  if (!selectedConversation) return;
+    if (!selectedConversation) return;
 
-  const detail = buildLiveNosNiaContext();
+    const detail = buildLiveNosNiaContext();
 
-  window.localStorage.setItem("nostur_nia_context", JSON.stringify(detail));
+    window.localStorage.setItem("nostur_nia_context", JSON.stringify(detail));
 
-  window.dispatchEvent(
-    new CustomEvent("nostur:nia-context-updated", {
-      detail
-    })
-  );
-}, [selectedConversation, selectedContacto, selectedVendedor, selectedOportunidad]);
+    window.dispatchEvent(
+      new CustomEvent("nostur:nia-context-updated", {
+        detail
+      })
+    );
+  }, [selectedConversation, selectedContacto, selectedVendedor, selectedOportunidad]);
 
   useEffect(() => {
     const channelName = `livenos-realtime-${Date.now()}`;
@@ -638,6 +695,34 @@ export function LiveNosPanel() {
     };
   }, [pendingAttachment]);
 
+
+  useEffect(() => {
+  function openFromNotification(event: Event) {
+    const customEvent = event as CustomEvent<{ conversationId?: string }>;
+    const conversationId = customEvent.detail?.conversationId;
+
+    if (!conversationId) return;
+
+    void selectConversation(conversationId);
+  }
+
+  window.addEventListener("nostur:open-livenos-conversation", openFromNotification);
+
+  const pendingConversationId = window.localStorage.getItem("nostur_livenos_last_notification_click");
+
+  if (pendingConversationId) {
+    window.localStorage.removeItem("nostur_livenos_last_notification_click");
+
+    window.setTimeout(() => {
+      void selectConversation(pendingConversationId);
+    }, 350);
+  }
+
+  return () => {
+    window.removeEventListener("nostur:open-livenos-conversation", openFromNotification);
+  };
+}, [conversaciones]);
+
   async function getUserId() {
     const { data } = await supabase.auth.getUser();
     return data.user?.id || null;
@@ -669,6 +754,10 @@ export function LiveNosPanel() {
     setNewConversationTemplateId(null);
     setNewConversationVariables({});
     setNewConversationSending(false);
+
+    setCandeFeedbackDraft(null);
+    setCandeFeedbackMotivo("");
+    setCandeFeedbackCorreccion("");
 
     if (pendingAttachment?.previewUrl) {
       URL.revokeObjectURL(pendingAttachment.previewUrl);
@@ -973,7 +1062,7 @@ export function LiveNosPanel() {
     setActionLoading(false);
   }
 
-    function applyQuickReplyVariables(text: string): string {
+  function applyQuickReplyVariables(text: string): string {
     const vendedorName = selectedVendedor?.nombre_publico_whatsapp || getVendedorName(selectedVendedor);
 
     return text
@@ -1073,204 +1162,194 @@ export function LiveNosPanel() {
   }
 
   async function sendLocalMessage() {
-  if (!selectedConversation) return;
+    if (!selectedConversation) return;
 
-  const hasText = Boolean(composerText.trim());
-  const hasAttachment = Boolean(pendingAttachment);
+    const hasText = Boolean(composerText.trim());
+    const hasAttachment = Boolean(pendingAttachment);
 
-  if (!hasText && !hasAttachment) return;
+    if (!hasText && !hasAttachment) return;
 
-  setActionLoading(true);
-  setError(null);
-  setStatus(null);
+    setActionLoading(true);
+    setError(null);
+    setStatus(null);
 
-  const userId = await getUserId();
+    const userId = await getUserId();
 
-  if (!userId) {
-    setError("No se pudo identificar el usuario actual.");
-    setActionLoading(false);
-    return;
-  }
-
-  const text = composerText.trim();
-  const captionText = text || "";
-  const now = new Date().toISOString();
-
-  let mediaPayload: Record<string, unknown> | null = null;
-
-  // Tipo que se guarda en LiveNos / DB.
-  let localMessageType = "text";
-
-  // Tipo que se manda realmente a WhatsApp.
-  let whatsappMessageType = "text";
-
-  try {
-    if (pendingAttachment) {
-      const uploaded = await uploadAttachmentToStorage({
-        conversationId: selectedConversation.id,
-        attachment: pendingAttachment
-      });
-
-      localMessageType =
-        pendingAttachment.kind === "image"
-          ? "image"
-          : pendingAttachment.kind === "audio"
-            ? "audio"
-            : "document";
-
-      whatsappMessageType = localMessageType;
-
-      mediaPayload = {
-        url: uploaded.url,
-        media_url: uploaded.url,
-        path: uploaded.path,
-        media_path: uploaded.path,
-        filename: uploaded.filename,
-        media_filename: uploaded.filename,
-        mime_type: uploaded.mimeType,
-        media_mime_type: uploaded.mimeType,
-        size: uploaded.size,
-        media_size: uploaded.size
-      };
+    if (!userId) {
+      setError("No se pudo identificar el usuario actual.");
+      setActionLoading(false);
+      return;
     }
 
-    const previewText =
-      text ||
-      (localMessageType === "image"
-        ? "Imagen enviada"
-        : localMessageType === "audio"
-          ? "Audio enviado"
-          : localMessageType === "document"
-            ? "Archivo enviado"
-            : "");
+    const text = composerText.trim();
+    const captionText = text || "";
+    const now = new Date().toISOString();
 
-    const { data: insertedMessage, error: insertError } = await supabase
-      .from("mensajes")
-      .insert({
-        conversacion_id: selectedConversation.id,
-        direction: "out",
-        type: localMessageType,
-        text: text || null,
-        media: mediaPayload,
-        reply_to_id: replyToMessage?.id || null,
-        forwarded: false,
-        status: "pending",
-        error: null,
-        wa_message_id: null,
-        sender_profile_id: userId,
-        deleted_at: null,
-        delivered_at: null,
-        read_at: null,
-        wa_timestamp: now,
-        sender_kind: "humano"
-      })
-      .select("id")
-      .single();
+    let mediaPayload: Record<string, unknown> | null = null;
 
-    if (insertError) {
-      throw new Error(insertError.message || "No se pudo crear el mensaje.");
-    }
+    let localMessageType = "text";
+    let whatsappMessageType = "text";
 
-    const messageId = insertedMessage.id as string;
+    try {
+      if (pendingAttachment) {
+        const uploaded = await uploadAttachmentToStorage({
+          conversationId: selectedConversation.id,
+          attachment: pendingAttachment
+        });
 
-    await supabase
-      .from("conversaciones")
-      .update({
-        last_message_at: now,
-        last_outbound_message_at: now,
-        last_message_preview: previewText,
-        estado_gestion: "en_gestion",
-        updated_at: now
-      })
-      .eq("id", selectedConversation.id);
+        localMessageType =
+          pendingAttachment.kind === "image"
+            ? "image"
+            : pendingAttachment.kind === "audio"
+              ? "audio"
+              : "document";
 
-    setComposerText("");
-    setReplyToMessage(null);
-    setShowEmojiPanel(false);
-    setShowQuickRepliesPanel(false);
-    clearPendingAttachment();
-    setIsDraggingFile(false);
+        whatsappMessageType = localMessageType;
 
-    shouldStickToBottomRef.current = true;
-    await loadConversationDetail(selectedConversation.id, { forceBottom: true });
-
-    const { data: sendData, error: sendError } = await supabase.functions.invoke(
-      "whatsapp-send-message",
-      {
-        body: {
-          conversacion_id: selectedConversation.id,
-          conversation_id: selectedConversation.id,
-          message_id: messageId,
-          local_message_id: messageId,
-          to: selectedConversation.wa_phone,
-          wa_phone: selectedConversation.wa_phone,
-          text: captionText,
-
-          // Si es audio, WhatsApp debe recibir type: audio, no document.
-          message_type: whatsappMessageType,
-
-          media_url: mediaPayload?.media_url || null,
-
-          // Si es audio, enviamos un MIME limpio aceptado por Meta.
-          media_mime_type:
-            localMessageType === "audio"
-              ? getCleanAudioMimeForMeta(String(mediaPayload?.media_mime_type || "audio/ogg"))
-              : mediaPayload?.media_mime_type || null,
-
-          media_filename:
-            localMessageType === "audio"
-              ? mediaPayload?.media_filename || "audio.ogg"
-              : mediaPayload?.media_filename || null,
-
-          reply_to_whatsapp_message_id: replyToMessage?.wa_message_id || null,
-          sender_profile_id: userId,
-          show_agent_name: showAgentName
-        }
+        mediaPayload = {
+          url: uploaded.url,
+          media_url: uploaded.url,
+          path: uploaded.path,
+          media_path: uploaded.path,
+          filename: uploaded.filename,
+          media_filename: uploaded.filename,
+          mime_type: uploaded.mimeType,
+          media_mime_type: uploaded.mimeType,
+          size: uploaded.size,
+          media_size: uploaded.size
+        };
       }
-    );
 
-    if (sendError) {
-      await supabase
+      const previewText =
+        text ||
+        (localMessageType === "image"
+          ? "Imagen enviada"
+          : localMessageType === "audio"
+            ? "Audio enviado"
+            : localMessageType === "document"
+              ? "Archivo enviado"
+              : "");
+
+      const { data: insertedMessage, error: insertError } = await supabase
         .from("mensajes")
-        .update({
-          status: "failed",
-          error: sendError.message || "No se pudo enviar el mensaje por WhatsApp."
+        .insert({
+          conversacion_id: selectedConversation.id,
+          direction: "out",
+          type: localMessageType,
+          text: text || null,
+          media: mediaPayload,
+          reply_to_id: replyToMessage?.id || null,
+          forwarded: false,
+          status: "pending",
+          error: null,
+          wa_message_id: null,
+          sender_profile_id: userId,
+          deleted_at: null,
+          delivered_at: null,
+          read_at: null,
+          wa_timestamp: now,
+          sender_kind: "humano"
         })
-        .eq("id", messageId);
+        .select("id")
+        .single();
 
-      setError(sendError.message || "No se pudo enviar el mensaje por WhatsApp.");
+      if (insertError) {
+        throw new Error(insertError.message || "No se pudo crear el mensaje.");
+      }
+
+      const messageId = insertedMessage.id as string;
+
+      await supabase
+        .from("conversaciones")
+        .update({
+          last_message_at: now,
+          last_outbound_message_at: now,
+          last_message_preview: previewText,
+          estado_gestion: "en_gestion",
+          updated_at: now
+        })
+        .eq("id", selectedConversation.id);
+
+      setComposerText("");
+      setReplyToMessage(null);
+      setShowEmojiPanel(false);
+      setShowQuickRepliesPanel(false);
+      clearPendingAttachment();
+      setIsDraggingFile(false);
+
+      shouldStickToBottomRef.current = true;
+      await loadConversationDetail(selectedConversation.id, { forceBottom: true });
+
+      const { data: sendData, error: sendError } = await supabase.functions.invoke(
+        "whatsapp-send-message",
+        {
+          body: {
+            conversacion_id: selectedConversation.id,
+            conversation_id: selectedConversation.id,
+            message_id: messageId,
+            local_message_id: messageId,
+            to: selectedConversation.wa_phone,
+            wa_phone: selectedConversation.wa_phone,
+            text: captionText,
+            message_type: whatsappMessageType,
+            media_url: mediaPayload?.media_url || null,
+            media_mime_type:
+              localMessageType === "audio"
+                ? getCleanAudioMimeForMeta(String(mediaPayload?.media_mime_type || "audio/ogg"))
+                : mediaPayload?.media_mime_type || null,
+            media_filename:
+              localMessageType === "audio"
+                ? mediaPayload?.media_filename || "audio.ogg"
+                : mediaPayload?.media_filename || null,
+            reply_to_whatsapp_message_id: replyToMessage?.wa_message_id || null,
+            sender_profile_id: userId,
+            show_agent_name: showAgentName
+          }
+        }
+      );
+
+      if (sendError) {
+        await supabase
+          .from("mensajes")
+          .update({
+            status: "failed",
+            error: sendError.message || "No se pudo enviar el mensaje por WhatsApp."
+          })
+          .eq("id", messageId);
+
+        setError(sendError.message || "No se pudo enviar el mensaje por WhatsApp.");
+        await loadData();
+        await loadConversationDetail(selectedConversation.id, { preserveScroll: true });
+        setActionLoading(false);
+        return;
+      }
+
+      if (!sendData?.ok) {
+        const errorMessage = sendData?.error || "WhatsApp rechazó el envío del mensaje.";
+
+        await supabase
+          .from("mensajes")
+          .update({
+            status: "failed",
+            error: errorMessage
+          })
+          .eq("id", messageId);
+
+        setError(errorMessage);
+        await loadData();
+        await loadConversationDetail(selectedConversation.id, { preserveScroll: true });
+        setActionLoading(false);
+        return;
+      }
+
       await loadData();
       await loadConversationDetail(selectedConversation.id, { preserveScroll: true });
       setActionLoading(false);
-      return;
-    }
-
-    if (!sendData?.ok) {
-      const errorMessage = sendData?.error || "WhatsApp rechazó el envío del mensaje.";
-
-      await supabase
-        .from("mensajes")
-        .update({
-          status: "failed",
-          error: errorMessage
-        })
-        .eq("id", messageId);
-
-      setError(errorMessage);
-      await loadData();
-      await loadConversationDetail(selectedConversation.id, { preserveScroll: true });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudo preparar el archivo.");
       setActionLoading(false);
-      return;
     }
-
-    await loadData();
-    await loadConversationDetail(selectedConversation.id, { preserveScroll: true });
-    setActionLoading(false);
-  } catch (err) {
-    setError(err instanceof Error ? err.message : "No se pudo preparar el archivo.");
-    setActionLoading(false);
   }
-}
 
   async function deleteMessage(message: Mensaje) {
     setActionLoading(true);
@@ -1360,94 +1439,86 @@ export function LiveNosPanel() {
   }
 
   async function startAudioRecording() {
-  if (audioRecording) return;
+    if (audioRecording) return;
 
-  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
-    setError("Este navegador no permite grabar audio.");
-    return;
-  }
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      setError("Este navegador no permite grabar audio.");
+      return;
+    }
 
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const preferredMimeType = getRecorderMimeType();
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const preferredMimeType = getRecorderMimeType();
 
-    const recorder = preferredMimeType
-      ? new MediaRecorder(stream, { mimeType: preferredMimeType })
-      : new MediaRecorder(stream);
+      const recorder = preferredMimeType
+        ? new MediaRecorder(stream, { mimeType: preferredMimeType })
+        : new MediaRecorder(stream);
 
-    const chunks: BlobPart[] = [];
+      const chunks: BlobPart[] = [];
 
-    recorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        chunks.push(event.data);
-      }
-    };
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          chunks.push(event.data);
+        }
+      };
 
-    recorder.onstop = () => {
-      const recordedMimeType =
-        recorder.mimeType ||
-        preferredMimeType ||
-        "audio/webm";
+      recorder.onstop = () => {
+        const recordedMimeType = recorder.mimeType || preferredMimeType || "audio/webm";
+        const extension = getAudioExtension(recordedMimeType);
+        const finalMimeType = getCleanAudioMimeForMeta(recordedMimeType) || recordedMimeType || "audio/webm";
 
-      const extension = getAudioExtension(recordedMimeType);
+        const blob = new Blob(chunks, {
+          type: finalMimeType
+        });
 
-      const finalMimeType =
-        getCleanAudioMimeForMeta(recordedMimeType) ||
-        recordedMimeType ||
-        "audio/webm";
+        const file = new File([blob], `audio-${Date.now()}.${extension}`, {
+          type: finalMimeType
+        });
 
-      const blob = new Blob(chunks, {
-        type: finalMimeType
-      });
+        setAttachmentFromFile(file);
 
-      const file = new File([blob], `audio-${Date.now()}.${extension}`, {
-        type: finalMimeType
-      });
+        stream.getTracks().forEach((track) => track.stop());
+        setAudioRecording(false);
+        audioRecorderRef.current = null;
 
-      setAttachmentFromFile(file);
+        if (!canSendAsWhatsappAudio(finalMimeType)) {
+          setStatus("Audio grabado. Si WhatsApp no acepta el formato, revisaremos conversión luego.");
+        } else {
+          setStatus("Audio listo para enviar.");
+        }
+      };
 
-      stream.getTracks().forEach((track) => track.stop());
+      audioRecorderRef.current = recorder;
+      recorder.start();
+
+      setAudioRecording(true);
+      setError(null);
+      setStatus("Grabando audio...");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudo iniciar la grabación.");
       setAudioRecording(false);
-      audioRecorderRef.current = null;
-
-      if (!canSendAsWhatsappAudio(finalMimeType)) {
-        setStatus("Audio grabado. Si WhatsApp no acepta el formato, revisaremos conversión luego.");
-      } else {
-        setStatus("Audio listo para enviar.");
-      }
-    };
-
-    audioRecorderRef.current = recorder;
-    recorder.start();
-
-    setAudioRecording(true);
-    setError(null);
-    setStatus("Grabando audio...");
-  } catch (err) {
-    setError(err instanceof Error ? err.message : "No se pudo iniciar la grabación.");
-    setAudioRecording(false);
-  }
-}
-
-function stopAudioRecording() {
-  const recorder = audioRecorderRef.current;
-
-  if (!recorder || recorder.state === "inactive") {
-    setAudioRecording(false);
-    return;
+    }
   }
 
-  recorder.stop();
-}
+  function stopAudioRecording() {
+    const recorder = audioRecorderRef.current;
 
-function handleMicButtonClick() {
-  if (audioRecording) {
-    stopAudioRecording();
-    return;
+    if (!recorder || recorder.state === "inactive") {
+      setAudioRecording(false);
+      return;
+    }
+
+    recorder.stop();
   }
 
-  void startAudioRecording();
-}
+  function handleMicButtonClick() {
+    if (audioRecording) {
+      stopAudioRecording();
+      return;
+    }
+
+    void startAudioRecording();
+  }
 
   async function syncWhatsappTemplates() {
     setTemplateSyncing(true);
@@ -1846,7 +1917,7 @@ function handleMicButtonClick() {
     setActionLoading(false);
   }
 
-    function getAttachmentKind(file: File): PendingAttachment["kind"] {
+  function getAttachmentKind(file: File): PendingAttachment["kind"] {
     if (file.type.startsWith("image/")) return "image";
     if (file.type.startsWith("audio/")) return "audio";
     return "document";
@@ -1996,21 +2067,21 @@ function handleMicButtonClick() {
   }
 
   function openMediaPreview(message: Mensaje) {
-  const url = getMessageMediaUrl(message);
+    const url = getMessageMediaUrl(message);
 
-  if (!url) return;
+    if (!url) return;
 
-  const name = getMessageMediaName(message);
-  const mime = getMessageMediaMime(message);
-  const type = isImageMessage(message) ? "image" : isAudioMessage(message) ? "audio" : "file";
+    const name = getMessageMediaName(message);
+    const mime = getMessageMediaMime(message);
+    const type = isImageMessage(message) ? "image" : isAudioMessage(message) ? "audio" : "file";
 
-  setPreviewMedia({
-    url,
-    name,
-    mime,
-    type
-  });
-}
+    setPreviewMedia({
+      url,
+      name,
+      mime,
+      type
+    });
+  }
 
   function openMediaInNewTab(message: Mensaje) {
     const mediaUrl = getMessageMediaUrl(message);
@@ -2019,76 +2090,409 @@ function handleMicButtonClick() {
 
     window.open(mediaUrl, "_blank", "noopener,noreferrer");
   }
-function buildLiveNosNiaContext() {
-  if (!selectedConversation) {
+
+  function buildLiveNosNiaContext() {
+    if (!selectedConversation) {
+      return {
+        source: "livenos",
+        module: "comunicaciones",
+        action: "open_nia_without_conversation",
+        created_at: new Date().toISOString()
+      };
+    }
+
     return {
       source: "livenos",
       module: "comunicaciones",
-      action: "open_nia_without_conversation",
+      action: "open_nia_with_conversation_context",
+
+      conversation_id: selectedConversation.id,
+      conversacion_id: selectedConversation.id,
+
+      wa_phone: selectedConversation.wa_phone,
+      contacto_id: selectedConversation.contacto_id,
+      contacto_nombre: getDisplayName(selectedContacto, selectedConversation),
+      contacto_profile_name: selectedContacto?.profile_name || null,
+
+      vendedor_id: selectedConversation.assigned_to || null,
+      vendedor_nombre: getVendedorName(selectedVendedor),
+
+      estado_gestion: selectedConversation.estado_gestion,
+      estado_comercial: selectedConversation.estado_comercial,
+      inbox: selectedConversation.inbox,
+      status: selectedConversation.status,
+
+      last_message_at: selectedConversation.last_message_at,
+      last_inbound_message_at: selectedConversation.last_inbound_message_at,
+      last_outbound_message_at: selectedConversation.last_outbound_message_at,
+      last_message_preview: selectedConversation.last_message_preview,
+
+      ventana_24h_abierta: Boolean(
+        selectedConversation.whatsapp_24h_expires_at &&
+          new Date(selectedConversation.whatsapp_24h_expires_at).getTime() > Date.now()
+      ),
+      whatsapp_24h_expires_at: selectedConversation.whatsapp_24h_expires_at,
+
+      oportunidad_id: selectedOportunidad?.id || null,
+      oportunidad_score: selectedOportunidad?.score || null,
+      oportunidad_estado_id: selectedOportunidad?.estado_id || null,
+      oportunidad_datos: selectedOportunidad?.datos || null,
+      cande_activa: selectedOportunidad?.cande_activa || false,
+      cande_handoff_requested_at: selectedOportunidad?.cande_handoff_requested_at || null,
+
       created_at: new Date().toISOString()
     };
   }
 
-  return {
-    source: "livenos",
-    module: "comunicaciones",
-    action: "open_nia_with_conversation_context",
+  function openNiaFromLiveNos() {
+    const detail = buildLiveNosNiaContext();
 
-    conversation_id: selectedConversation.id,
-    conversacion_id: selectedConversation.id,
+    window.localStorage.setItem("nostur_nia_context", JSON.stringify(detail));
 
-    wa_phone: selectedConversation.wa_phone,
-    contacto_id: selectedConversation.contacto_id,
-    contacto_nombre: getDisplayName(selectedContacto, selectedConversation),
-    contacto_profile_name: selectedContacto?.profile_name || null,
+    window.dispatchEvent(
+      new CustomEvent("nostur:open-nia-chat", {
+        detail
+      })
+    );
 
-    vendedor_id: selectedConversation.assigned_to || null,
-    vendedor_nombre: getVendedorName(selectedVendedor),
+    setStatus(
+      selectedConversation
+        ? "NIA recibió el contexto de esta conversación."
+        : "NIA abierta sin conversación seleccionada."
+    );
+  }
 
-    estado_gestion: selectedConversation.estado_gestion,
-    estado_comercial: selectedConversation.estado_comercial,
-    inbox: selectedConversation.inbox,
-    status: selectedConversation.status,
+  function openCandeFeedback(message: Mensaje, tipo: CandeFeedbackTipo) {
+    setCandeFeedbackDraft({
+      message,
+      tipo
+    });
 
-    last_message_at: selectedConversation.last_message_at,
-    last_inbound_message_at: selectedConversation.last_inbound_message_at,
-    last_outbound_message_at: selectedConversation.last_outbound_message_at,
-    last_message_preview: selectedConversation.last_message_preview,
+    setCandeFeedbackMotivo("");
+    setCandeFeedbackCorreccion(
+      tipo === "positivo" ? "La respuesta fue correcta, útil y natural." : ""
+    );
 
-    ventana_24h_abierta: Boolean(
-      selectedConversation.whatsapp_24h_expires_at &&
-        new Date(selectedConversation.whatsapp_24h_expires_at).getTime() > Date.now()
-    ),
-    whatsapp_24h_expires_at: selectedConversation.whatsapp_24h_expires_at,
+    setOpenMessageMenuId(null);
+  }
 
-    oportunidad_id: selectedOportunidad?.id || null,
-    oportunidad_score: selectedOportunidad?.score || null,
-    oportunidad_estado_id: selectedOportunidad?.estado_id || null,
-    oportunidad_datos: selectedOportunidad?.datos || null,
-    cande_activa: selectedOportunidad?.cande_activa || false,
-    cande_handoff_requested_at: selectedOportunidad?.cande_handoff_requested_at || null,
+  function closeCandeFeedbackModal() {
+    if (candeFeedbackSaving) return;
 
-    created_at: new Date().toISOString()
-  };
-}
-function openNiaFromLiveNos() {
-  const detail = buildLiveNosNiaContext();
+    setCandeFeedbackDraft(null);
+    setCandeFeedbackMotivo("");
+    setCandeFeedbackCorreccion("");
+  }
 
-  window.localStorage.setItem("nostur_nia_context", JSON.stringify(detail));
+  async function saveCandeFeedback() {
+    if (!selectedConversation || !candeFeedbackDraft) return;
 
-  window.dispatchEvent(
-    new CustomEvent("nostur:open-nia-chat", {
-      detail
-    })
-  );
+    const userId = await getUserId();
 
-  setStatus(
-    selectedConversation
-      ? "NIA recibió el contexto de esta conversación."
-      : "NIA abierta sin conversación seleccionada."
-  );
-}
+    setCandeFeedbackSaving(true);
+    setError(null);
+    setStatus(null);
 
+    const message = candeFeedbackDraft.message;
+    const tipo = candeFeedbackDraft.tipo;
+
+    const oportunidadDatos =
+      selectedOportunidad?.datos && typeof selectedOportunidad.datos === "object"
+        ? selectedOportunidad.datos
+        : {};
+
+    const contexto = {
+      conversation_id: selectedConversation.id,
+      wa_phone: selectedConversation.wa_phone,
+      contacto_nombre: getDisplayName(selectedContacto, selectedConversation),
+      vendedor_nombre: getVendedorName(selectedVendedor),
+      estado_gestion: selectedConversation.estado_gestion,
+      estado_comercial: selectedConversation.estado_comercial,
+      inbox: selectedConversation.inbox,
+      oportunidad_id: selectedOportunidad?.id || null,
+      oportunidad_score: selectedOportunidad?.score || null,
+      oportunidad_datos: oportunidadDatos,
+      last_message_preview: selectedConversation.last_message_preview,
+      created_from: "livenos_feedback_modal"
+    };
+
+    const { error: insertError } = await supabase.from("cande_feedback").insert({
+      conversacion_id: selectedConversation.id,
+      mensaje_id: message.id,
+      oportunidad_id: selectedOportunidad?.id || null,
+      autor_id: userId,
+      feedback_tipo: tipo,
+      motivo: candeFeedbackMotivo.trim() || null,
+      correccion_sugerida: candeFeedbackCorreccion.trim() || null,
+      respuesta_original: message.text || null,
+      contexto
+    });
+
+    if (insertError) {
+      setError(insertError.message || "No se pudo guardar el feedback de Cande.");
+      setCandeFeedbackSaving(false);
+      return;
+    }
+
+    const emoji = tipo === "positivo" ? "👍" : "👎";
+
+    const existing = reacciones.find(
+      (reaccion) => reaccion.mensaje_id === message.id && reaccion.autor_id === userId
+    );
+
+    if (existing) {
+      await supabase.from("mensaje_reacciones").delete().eq("id", existing.id);
+    }
+
+    await supabase.from("mensaje_reacciones").insert({
+      mensaje_id: message.id,
+      autor_id: userId,
+      emoji
+    });
+
+    setStatus(
+      tipo === "positivo"
+        ? "Feedback positivo guardado para Cande."
+        : "Feedback guardado. Cande podrá aprender de esta corrección."
+    );
+
+    setCandeFeedbackDraft(null);
+    setCandeFeedbackMotivo("");
+    setCandeFeedbackCorreccion("");
+
+    await loadConversationDetail(selectedConversation.id, { preserveScroll: true });
+
+    setCandeFeedbackSaving(false);
+  }
+
+  function renderCandeFeedbackModal() {
+    if (!candeFeedbackDraft || !selectedConversation) return null;
+
+    const message = candeFeedbackDraft.message;
+    const tipo = candeFeedbackDraft.tipo;
+
+    const oportunidadDatos =
+      selectedOportunidad?.datos && typeof selectedOportunidad.datos === "object"
+        ? selectedOportunidad.datos
+        : {};
+
+    const destino = getDatoFromKeys(oportunidadDatos, ["destino", "destinos", "lugar"]);
+    const origen = getDatoFromKeys(oportunidadDatos, ["origen", "ciudad_origen", "salida_desde"]);
+    const fechas = getDatoFromKeys(oportunidadDatos, ["fechas_tentativas", "fecha", "fechas", "mes"]);
+    const pasajeros = getDatoFromKeys(oportunidadDatos, [
+      "cantidad_pasajeros",
+      "pasajeros",
+      "pax",
+      "personas"
+    ]);
+    const presupuesto = getDatoFromKeys(oportunidadDatos, [
+      "presupuesto_aproximado",
+      "presupuesto",
+      "budget"
+    ]);
+
+    const score = Number(selectedOportunidad?.score || 0);
+
+    return (
+      <div className="fixed inset-0 z-[120] flex items-center justify-center bg-[#0f172a]/55 p-4 backdrop-blur-sm">
+        <div className="flex max-h-[92vh] w-full max-w-[860px] flex-col overflow-hidden rounded-[30px] bg-white shadow-2xl ring-1 ring-black/10">
+          <div className="flex items-start justify-between gap-4 border-b border-black/10 px-5 py-4">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <div
+                  className={[
+                    "flex h-10 w-10 items-center justify-center rounded-2xl text-lg font-black",
+                    tipo === "positivo"
+                      ? "bg-emerald-50 text-emerald-700"
+                      : "bg-amber-50 text-amber-700"
+                  ].join(" ")}
+                >
+                  {tipo === "positivo" ? "👍" : "👎"}
+                </div>
+
+                <div>
+                  <h3 className="text-lg font-black text-[#142033]">Feedback para Cande</h3>
+                  <p className="mt-0.5 text-xs font-bold text-[#64748b]">
+                    Esto queda guardado para revisar y mejorar respuestas futuras.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={closeCandeFeedbackModal}
+              disabled={candeFeedbackSaving}
+              className="rounded-2xl bg-[#f1f5f9] px-3 py-2 text-xs font-black text-[#64748b] hover:bg-[#e2e8f0] disabled:opacity-50"
+            >
+              Cerrar
+            </button>
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-auto bg-[#f8fafc] p-5">
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_300px]">
+              <section className="space-y-4">
+                <div className="rounded-2xl border border-black/10 bg-white p-4">
+                  <div className="mb-2 text-[11px] font-black uppercase tracking-[0.12em] text-[#94a3b8]">
+                    Respuesta original de Cande
+                  </div>
+
+                  <div className="whitespace-pre-wrap rounded-2xl bg-[#f8fafc] p-3 text-sm font-bold leading-relaxed text-[#142033]">
+                    {message.text || "Sin texto"}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-black/10 bg-white p-4">
+                  <div className="mb-2 text-[11px] font-black uppercase tracking-[0.12em] text-[#94a3b8]">
+                    Motivo del feedback
+                  </div>
+
+                  <textarea
+                    value={candeFeedbackMotivo}
+                    onChange={(event) => setCandeFeedbackMotivo(event.target.value)}
+                    placeholder={
+                      tipo === "positivo"
+                        ? "Ej: Respondió bien, pidió el dato correcto, tono natural..."
+                        : "Ej: Derivó muy rápido, inventó datos, no pidió origen, tono incorrecto..."
+                    }
+                    className="min-h-[100px] w-full resize-none rounded-2xl border border-black/10 bg-white px-4 py-3 text-sm font-bold leading-relaxed text-[#142033] outline-none placeholder:text-[#94a3b8] focus:border-[#4f7c90]"
+                  />
+                </div>
+
+                <div className="rounded-2xl border border-black/10 bg-white p-4">
+                  <div className="mb-2 text-[11px] font-black uppercase tracking-[0.12em] text-[#94a3b8]">
+                    Corrección o respuesta sugerida
+                  </div>
+
+                  <textarea
+                    value={candeFeedbackCorreccion}
+                    onChange={(event) => setCandeFeedbackCorreccion(event.target.value)}
+                    placeholder="Escribí cómo debería haber respondido Cande en este caso..."
+                    className="min-h-[140px] w-full resize-none rounded-2xl border border-black/10 bg-white px-4 py-3 text-sm font-bold leading-relaxed text-[#142033] outline-none placeholder:text-[#94a3b8] focus:border-[#4f7c90]"
+                  />
+
+                  <p className="mt-2 text-xs font-bold text-[#64748b]">
+                    Esta corrección no se envía al pasajero. Queda como entrenamiento interno.
+                  </p>
+                </div>
+              </section>
+
+              <aside className="space-y-4">
+                <section className="rounded-2xl border border-black/10 bg-white p-4">
+                  <h4 className="text-sm font-black text-[#142033]">Contexto comercial</h4>
+
+                  <div className="mt-3 space-y-2 text-xs font-bold text-[#475569]">
+                    <div className="flex justify-between gap-3">
+                      <span>Pasajero</span>
+                      <span className="max-w-[150px] truncate text-right font-black text-[#142033]">
+                        {getDisplayName(selectedContacto, selectedConversation)}
+                      </span>
+                    </div>
+
+                    <div className="flex justify-between gap-3">
+                      <span>WhatsApp</span>
+                      <span className="max-w-[150px] truncate text-right font-black text-[#142033]">
+                        {selectedConversation.wa_phone}
+                      </span>
+                    </div>
+
+                    <div className="flex justify-between gap-3">
+                      <span>Score</span>
+                      <span className="font-black text-[#142033]">
+                        {score}/100 · {getScoreLabel(score)}
+                      </span>
+                    </div>
+
+                    <div className="flex justify-between gap-3">
+                      <span>Vendedor</span>
+                      <span className="max-w-[150px] truncate text-right font-black text-[#142033]">
+                        {getVendedorName(selectedVendedor)}
+                      </span>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="rounded-2xl border border-black/10 bg-white p-4">
+                  <h4 className="text-sm font-black text-[#142033]">Datos detectados</h4>
+
+                  <div className="mt-3 space-y-2 text-xs font-bold text-[#475569]">
+                    <div className="flex justify-between gap-3">
+                      <span>Destino</span>
+                      <span className="max-w-[150px] truncate text-right font-black text-[#142033]">
+                        {destino}
+                      </span>
+                    </div>
+
+                    <div className="flex justify-between gap-3">
+                      <span>Origen</span>
+                      <span className="max-w-[150px] truncate text-right font-black text-[#142033]">
+                        {origen}
+                      </span>
+                    </div>
+
+                    <div className="flex justify-between gap-3">
+                      <span>Fechas</span>
+                      <span className="max-w-[150px] truncate text-right font-black text-[#142033]">
+                        {fechas}
+                      </span>
+                    </div>
+
+                    <div className="flex justify-between gap-3">
+                      <span>Pasajeros</span>
+                      <span className="max-w-[150px] truncate text-right font-black text-[#142033]">
+                        {pasajeros}
+                      </span>
+                    </div>
+
+                    <div className="flex justify-between gap-3">
+                      <span>Presupuesto</span>
+                      <span className="max-w-[150px] truncate text-right font-black text-[#142033]">
+                        {presupuesto}
+                      </span>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                  <h4 className="text-sm font-black text-amber-900">Cómo usarlo</h4>
+                  <p className="mt-2 text-xs font-bold leading-relaxed text-amber-800">
+                    Usá 👍 cuando Cande respondió bien. Usá 👎 o corrección cuando haya inventado,
+                    omitido datos importantes, derivado rápido o usado mal el contexto.
+                  </p>
+                </section>
+              </aside>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between gap-3 border-t border-black/10 bg-white px-5 py-4">
+            <button
+              type="button"
+              onClick={closeCandeFeedbackModal}
+              disabled={candeFeedbackSaving}
+              className="h-10 rounded-2xl bg-[#f1f5f9] px-4 text-xs font-black text-[#64748b] hover:bg-[#e2e8f0] disabled:opacity-50"
+            >
+              Cancelar
+            </button>
+
+            <button
+              type="button"
+              onClick={saveCandeFeedback}
+              disabled={candeFeedbackSaving}
+              className={[
+                "inline-flex h-10 items-center gap-2 rounded-2xl px-4 text-xs font-black text-white shadow-sm disabled:opacity-50",
+                tipo === "positivo"
+                  ? "bg-emerald-600 hover:bg-emerald-700"
+                  : "bg-[#4f7c90] hover:bg-[#406b7d]"
+              ].join(" ")}
+            >
+              {candeFeedbackSaving ? <Loader2 size={14} className="animate-spin" /> : null}
+              Guardar feedback
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   function renderMessageMenu(message: Mensaje) {
     const mediaUrl = getMessageMediaUrl(message);
@@ -2172,6 +2576,39 @@ function openNiaFromLiveNos() {
               <Download size={14} />
               Descargar archivo
             </a>
+          </>
+        ) : null}
+
+        {message.sender_kind === "cande" ? (
+          <>
+            <div className="my-1 border-t border-black/10" />
+
+            <button
+              type="button"
+              onClick={() => openCandeFeedback(message, "positivo")}
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-black text-emerald-700 hover:bg-emerald-50"
+            >
+              👍
+              Cande respondió bien
+            </button>
+
+            <button
+              type="button"
+              onClick={() => openCandeFeedback(message, "negativo")}
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-black text-amber-700 hover:bg-amber-50"
+            >
+              👎
+              Marcar mala respuesta
+            </button>
+
+            <button
+              type="button"
+              onClick={() => openCandeFeedback(message, "correccion")}
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-black text-[#4f7c90] hover:bg-[#eef6f7]"
+            >
+              <Sparkles size={14} />
+              Corregir / enseñar
+            </button>
           </>
         ) : null}
 
@@ -2411,7 +2848,12 @@ function openNiaFromLiveNos() {
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-xs font-black">{mediaName}</div>
 
-                    <div className={["mt-0.5 text-[10px] font-bold", outbound ? "text-white/70" : "text-[#94a3b8]"].join(" ")}>
+                    <div
+                      className={[
+                        "mt-0.5 text-[10px] font-bold",
+                        outbound ? "text-white/70" : "text-[#94a3b8]"
+                      ].join(" ")}
+                    >
                       {mediaMime || "archivo"}
                       {mediaSize ? ` · ${formatFileSize(mediaSize)}` : ""}
                     </div>
@@ -2448,19 +2890,29 @@ function openNiaFromLiveNos() {
             <div className="mt-2 flex items-center gap-2 text-white/80">
               <button
                 type="button"
-                onClick={() => handleReaction(message, "👍")}
+                onClick={() => openCandeFeedback(message, "positivo")}
                 className="rounded-xl p-1 hover:bg-white/15"
                 title="Buen mensaje"
               >
                 👍
               </button>
+
               <button
                 type="button"
-                onClick={() => handleReaction(message, "👎")}
+                onClick={() => openCandeFeedback(message, "negativo")}
                 className="rounded-xl p-1 hover:bg-white/15"
                 title="Mal mensaje"
               >
                 👎
+              </button>
+
+              <button
+                type="button"
+                onClick={() => openCandeFeedback(message, "correccion")}
+                className="rounded-xl px-2 py-1 text-[10px] font-black hover:bg-white/15"
+                title="Corregir respuesta de Cande"
+              >
+                Corregir
               </button>
             </div>
           ) : null}
@@ -2512,8 +2964,6 @@ function openNiaFromLiveNos() {
     if (item.kind === "message") return renderMessageBubble(item.message);
     return renderInternalBubble(item.nota);
   }
-
-
 
   function renderTemplateModal() {
     if (!templateModalOpen || !selectedConversation) return null;
@@ -2847,6 +3297,77 @@ function openNiaFromLiveNos() {
   function renderRightPanelContent() {
     if (!selectedConversation) return null;
 
+    const oportunidadDatos =
+      selectedOportunidad?.datos && typeof selectedOportunidad.datos === "object"
+        ? selectedOportunidad.datos
+        : {};
+
+    const score = Number(selectedOportunidad?.score || 0);
+
+    const destino = getDatoFromKeys(oportunidadDatos, [
+      "destino",
+      "destinos",
+      "lugar",
+      "ciudad",
+      "pais",
+      "país"
+    ]);
+
+    const origen = getDatoFromKeys(oportunidadDatos, [
+      "origen",
+      "ciudad_origen",
+      "salida_desde"
+    ]);
+
+    const origenSugerido = getDatoFromKeys(oportunidadDatos, ["origen_sugerido"]);
+
+    const origenAeropuerto = getDatoFromKeys(oportunidadDatos, [
+      "origen_aeropuerto",
+      "origen_sugerido_aeropuerto",
+      "aeropuerto_origen"
+    ]);
+
+    const origenConfirmado = oportunidadDatos.origen_confirmado === true;
+
+    const fechas = getDatoFromKeys(oportunidadDatos, [
+      "fechas_tentativas",
+      "fecha_tentativa",
+      "fecha",
+      "fechas",
+      "mes",
+      "cuando",
+      "cuándo",
+      "fecha_viaje"
+    ]);
+
+    const pasajeros = getDatoFromKeys(oportunidadDatos, [
+      "cantidad_pasajeros",
+      "pasajeros",
+      "pax",
+      "cantidad_pax",
+      "personas",
+      "cantidad_personas"
+    ]);
+
+    const presupuesto = getDatoFromKeys(oportunidadDatos, [
+      "presupuesto_aproximado",
+      "presupuesto",
+      "budget",
+      "monto_estimado"
+    ]);
+
+    const ultimoMensaje = getDatoFromKeys(oportunidadDatos, [
+      "ultimo_mensaje",
+      "last_message",
+      "mensaje"
+    ]);
+
+    const tipoViaje = getDatoFromKeys(oportunidadDatos, [
+      "tipo_viaje",
+      "tipo_de_viaje",
+      "categoria_viaje"
+    ]);
+
     if (rightTab === "info") {
       return (
         <div className="space-y-4">
@@ -2891,10 +3412,19 @@ function openNiaFromLiveNos() {
             <h3 className="text-sm font-black text-[#142033]">Oportunidad</h3>
 
             {selectedOportunidad ? (
-              <div className="mt-3 space-y-2 text-xs font-bold text-[#475569]">
+              <div className="mt-3 space-y-3 text-xs font-bold text-[#475569]">
                 <div className="flex justify-between gap-3">
                   <span>Score</span>
-                  <span className="font-black text-[#142033]">{selectedOportunidad.score}/100</span>
+                  <span className={["font-black", getScoreTextColor(score)].join(" ")}>
+                    {score}/100 · {getScoreLabel(score)}
+                  </span>
+                </div>
+
+                <div className="h-2 overflow-hidden rounded-full bg-slate-200">
+                  <div
+                    className="h-full rounded-full bg-[#4f7c90]"
+                    style={{ width: `${Math.min(Math.max(score, 0), 100)}%` }}
+                  />
                 </div>
 
                 <div className="flex justify-between gap-3">
@@ -2906,25 +3436,98 @@ function openNiaFromLiveNos() {
 
                 <div className="flex justify-between gap-3">
                   <span>Estado</span>
-                  <span className="font-black text-[#142033]">
+                  <span className="max-w-[165px] truncate text-right font-black text-[#142033]">
                     {pipeline.find((item) => item.id === selectedOportunidad.estado_id)?.nombre || "—"}
                   </span>
                 </div>
 
+                <div className="flex justify-between gap-3">
+                  <span>Derivación</span>
+                  <span className="max-w-[165px] truncate text-right font-black text-[#142033]">
+                    {selectedOportunidad.cande_handoff_requested_at
+                      ? formatDateTime(selectedOportunidad.cande_handoff_requested_at)
+                      : "No solicitada"}
+                  </span>
+                </div>
+
                 <div className="mt-4 rounded-2xl bg-white p-3">
-                  <div className="mb-2 text-[11px] font-black uppercase tracking-[0.12em] text-[#94a3b8]">
+                  <div className="mb-3 text-[11px] font-black uppercase tracking-[0.12em] text-[#94a3b8]">
                     Datos relevados
                   </div>
 
-                  <div className="space-y-1.5">
-                    {["destino", "origen", "fecha", "pax", "presupuesto"].map((key) => (
-                      <div key={key} className="flex justify-between gap-3">
-                        <span className="capitalize">{key}</span>
-                        <span className="max-w-[150px] truncate font-black text-[#142033]">
-                          {getDato(selectedOportunidad.datos, key)}
-                        </span>
-                      </div>
-                    ))}
+                  <div className="space-y-2">
+                    <div className="flex justify-between gap-3">
+                      <span>Destino</span>
+                      <span className="max-w-[165px] truncate text-right font-black text-[#142033]">
+                        {destino}
+                      </span>
+                    </div>
+
+                    <div className="flex justify-between gap-3">
+                      <span>Origen</span>
+                      <span className="max-w-[165px] truncate text-right font-black text-[#142033]">
+                        {origen !== "—" ? origen : "Sin confirmar"}
+                      </span>
+                    </div>
+
+                    <div className="flex justify-between gap-3">
+                      <span>Origen sugerido</span>
+                      <span className="max-w-[165px] truncate text-right font-black text-[#142033]">
+                        {origenSugerido}
+                      </span>
+                    </div>
+
+                    <div className="flex justify-between gap-3">
+                      <span>Origen confirmado</span>
+                      <span className="max-w-[165px] truncate text-right font-black text-[#142033]">
+                        {origenConfirmado ? "Sí" : "No"}
+                      </span>
+                    </div>
+
+                    <div className="flex justify-between gap-3">
+                      <span>Aeropuerto sugerido</span>
+                      <span className="max-w-[165px] truncate text-right font-black text-[#142033]">
+                        {origenAeropuerto}
+                      </span>
+                    </div>
+
+                    <div className="flex justify-between gap-3">
+                      <span>Fechas tentativas</span>
+                      <span className="max-w-[165px] truncate text-right font-black text-[#142033]">
+                        {fechas}
+                      </span>
+                    </div>
+
+                    <div className="flex justify-between gap-3">
+                      <span>Pasajeros</span>
+                      <span className="max-w-[165px] truncate text-right font-black text-[#142033]">
+                        {pasajeros}
+                      </span>
+                    </div>
+
+                    <div className="flex justify-between gap-3">
+                      <span>Presupuesto</span>
+                      <span className="max-w-[165px] truncate text-right font-black text-[#142033]">
+                        {presupuesto}
+                      </span>
+                    </div>
+
+                    <div className="flex justify-between gap-3">
+                      <span>Tipo de viaje</span>
+                      <span className="max-w-[165px] truncate text-right font-black text-[#142033]">
+                        {tipoViaje}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl bg-white p-3">
+                  <div className="mb-2 text-[11px] font-black uppercase tracking-[0.12em] text-[#94a3b8]">
+                    Último dato guardado
+                  </div>
+
+                  <div className="line-clamp-4 text-xs font-bold leading-relaxed text-[#475569]">
+                    {ultimoMensaje}
                   </div>
                 </div>
               </div>
@@ -3047,6 +3650,7 @@ function openNiaFromLiveNos() {
       {renderTemplateModal()}
       {renderNewConversationModal()}
       {renderMediaPreviewModal()}
+      {renderCandeFeedbackModal()}
 
       <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[#edf3f7] text-[#142033]">
         <header className="shrink-0 border-b border-black/10 bg-white/80 px-5 py-4 backdrop-blur-xl">
@@ -3097,26 +3701,26 @@ function openNiaFromLiveNos() {
           ) : null}
         </header>
 
-      <main className="grid min-h-0 flex-1 grid-cols-[320px_410px_minmax(0,1fr)] gap-4 overflow-hidden p-4">
-  <aside className="flex min-h-0 flex-col gap-4 overflow-hidden">
-<LiveNosSidebar
-  activeInbox={activeInbox}
-  inboxCounts={inboxCounts}
-  profiles={profiles}
-  onChangeInbox={setActiveInbox}
-  onOpenNia={openNiaFromLiveNos}
-/>
-  </aside>
+        <main className="grid min-h-0 flex-1 grid-cols-[320px_410px_minmax(0,1fr)] gap-4 overflow-hidden p-4">
+          <aside className="flex min-h-0 flex-col gap-4 overflow-hidden">
+            <LiveNosSidebar
+              activeInbox={activeInbox}
+              inboxCounts={inboxCounts}
+              profiles={profiles}
+              onChangeInbox={setActiveInbox}
+              onOpenNia={openNiaFromLiveNos}
+            />
+          </aside>
 
-<ConversationsColumn
-  loading={loading}
-  search={search}
-  activeInbox={activeInbox}
-  selectedId={selectedId}
-  filteredConversations={filteredConversations}
-  onSearchChange={setSearch}
-  onSelectConversation={selectConversation}
-/>
+          <ConversationsColumn
+            loading={loading}
+            search={search}
+            activeInbox={activeInbox}
+            selectedId={selectedId}
+            filteredConversations={filteredConversations}
+            onSearchChange={setSearch}
+            onSelectConversation={selectConversation}
+          />
 
           <section className="flex min-h-0 flex-col overflow-hidden rounded-[28px] border border-black/10 bg-white/80 shadow-sm">
             {!selectedConversation ? (
@@ -3587,34 +4191,34 @@ function openNiaFromLiveNos() {
                           />
                         </div>
 
-         <button
-  type="button"
-  onClick={composerText.trim() || pendingAttachment ? sendLocalMessage : handleMicButtonClick}
-  disabled={actionLoading}
-  className={[
-    "flex h-12 w-12 shrink-0 items-center justify-center rounded-full text-white shadow-sm transition disabled:cursor-not-allowed disabled:opacity-50",
-    audioRecording
-      ? "bg-red-500 hover:bg-red-600 animate-pulse"
-      : "bg-[#4f7c90] hover:bg-[#406b7d]"
-  ].join(" ")}
-  title={
-    composerText.trim() || pendingAttachment
-      ? "Enviar por WhatsApp"
-      : audioRecording
-        ? "Detener grabación"
-        : "Grabar audio"
-  }
->
-  {actionLoading ? (
-    <Loader2 size={18} className="animate-spin" />
-  ) : composerText.trim() || pendingAttachment ? (
-    <Send size={19} />
-  ) : audioRecording ? (
-    <span className="h-3.5 w-3.5 rounded-sm bg-white" />
-  ) : (
-    <Mic size={20} />
-  )}
-</button>
+                        <button
+                          type="button"
+                          onClick={composerText.trim() || pendingAttachment ? sendLocalMessage : handleMicButtonClick}
+                          disabled={actionLoading}
+                          className={[
+                            "flex h-12 w-12 shrink-0 items-center justify-center rounded-full text-white shadow-sm transition disabled:cursor-not-allowed disabled:opacity-50",
+                            audioRecording
+                              ? "bg-red-500 hover:bg-red-600 animate-pulse"
+                              : "bg-[#4f7c90] hover:bg-[#406b7d]"
+                          ].join(" ")}
+                          title={
+                            composerText.trim() || pendingAttachment
+                              ? "Enviar por WhatsApp"
+                              : audioRecording
+                                ? "Detener grabación"
+                                : "Grabar audio"
+                          }
+                        >
+                          {actionLoading ? (
+                            <Loader2 size={18} className="animate-spin" />
+                          ) : composerText.trim() || pendingAttachment ? (
+                            <Send size={19} />
+                          ) : audioRecording ? (
+                            <span className="h-3.5 w-3.5 rounded-sm bg-white" />
+                          ) : (
+                            <Mic size={20} />
+                          )}
+                        </button>
                       </div>
 
                       <div className="mt-2 flex justify-end">
@@ -3678,7 +4282,7 @@ function openNiaFromLiveNos() {
                   </div>
 
                   <aside className="min-h-0 overflow-auto border-l border-black/10 bg-white p-4">
-                  <RightPanelTabs rightTab={rightTab} onChangeTab={setRightTab} />
+                    <RightPanelTabs rightTab={rightTab} onChangeTab={setRightTab} />
 
                     <div className="mt-4">{renderRightPanelContent()}</div>
                   </aside>
@@ -3691,4 +4295,3 @@ function openNiaFromLiveNos() {
     </>
   );
 }
-

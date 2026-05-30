@@ -7,7 +7,6 @@ import { WebviewArea } from "./WebviewArea";
 import { useBrowserStore } from "../store/browserStore";
 import { getAppById } from "../registry/appRegistry";
 
-
 import { ContactosPanel } from "./contactos/ContactosPanel";
 import { ClientesPanel } from "./clientes/ClientesPanel";
 import { PresupuestosV2Panel } from "./presupuestos/PresupuestosV2Panel";
@@ -32,13 +31,13 @@ import { ColaborativoPanel } from "./colaborativo/ColaborativoPanel";
 import { TableroControlPanel } from "./dashboard/TableroControlPanel";
 import { ImportadorCatalogosPanel } from "./config/ImportadorCatalogosPanel";
 
-
 import { LiveNosPanel } from "../modules/comunicaciones/LiveNosPanel";
 import { OportunidadesPanel } from "../modules/comunicaciones/OportunidadesPanel";
 import { CandePanel } from "../modules/comunicaciones/CandePanel";
 import { NiaPanel } from "../modules/comunicaciones/NiaPanel";
 import { ControlIaPanel } from "../modules/comunicaciones/ControlIaPanel";
 import { NiaFloatingWidget } from "./NiaFloatingWidget";
+import { LiveNosNotificationsProvider } from "./LiveNosNotificationsProvider";
 
 type InternalOpenEventDetail = {
   moduleId?: string;
@@ -129,6 +128,35 @@ export function Shell() {
     };
   }, [createTab]);
 
+  useEffect(() => {
+    const unsubscribe = window.nostur?.onOpenConversationFromNotification?.(({ conversationId }) => {
+      if (!conversationId) return;
+
+      window.localStorage.setItem("nostur_livenos_last_notification_click", conversationId);
+
+      createTab({
+        appId: "livenos",
+        url: "internal://livenos",
+        title: "LiveNos",
+        activate: true
+      });
+
+      window.setTimeout(() => {
+        window.dispatchEvent(
+          new CustomEvent("nostur:open-livenos-conversation", {
+            detail: {
+              conversationId
+            }
+          })
+        );
+      }, 450);
+    });
+
+    return () => {
+      unsubscribe?.();
+    };
+  }, [createTab]);
+
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
   const activeUrl = activeTab?.url || "nostur://home";
 
@@ -157,7 +185,6 @@ export function Shell() {
   const isColaborativo = activeUrl === "internal://colaborativo";
   const isTableroControl = activeUrl === "internal://tablero-control";
   const isImportadorCatalogos = activeUrl === "internal://importador-catalogos";
- 
 
   const isLiveNos = activeUrl === "internal://livenos";
   const isOportunidades = activeUrl === "internal://oportunidades";
@@ -236,7 +263,9 @@ export function Shell() {
             ) : (
               <WebviewArea />
             )}
-             <NiaFloatingWidget activeUrl={activeUrl} />
+
+            <NiaFloatingWidget activeUrl={activeUrl} />
+            <LiveNosNotificationsProvider />
           </div>
         </main>
       </div>

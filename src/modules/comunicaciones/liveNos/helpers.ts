@@ -63,13 +63,36 @@ export function getMessageSenderName(message: Mensaje, profiles: ProfileLite[]):
   return profile.nombre_publico_whatsapp || getVendedorName(profile);
 }
 
+export function cleanDato(value: unknown): string {
+  if (value === null || value === undefined) return "";
+
+  if (typeof value === "string") return value.trim();
+
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+
+  if (typeof value === "boolean") return value ? "Sí" : "No";
+
+  return "";
+}
+
 export function getDato(datos: Record<string, unknown> | null | undefined, key: string): string {
-  const value = datos?.[key];
+  const value = cleanDato(datos?.[key]);
+  return value || "—";
+}
 
-  if (value === null || value === undefined) return "—";
-  if (typeof value === "string") return value || "—";
+export function getDatoFromKeys(
+  datos: Record<string, unknown> | null | undefined,
+  keys: string[],
+  fallback = "—"
+): string {
+  if (!datos) return fallback;
 
-  return String(value);
+  for (const key of keys) {
+    const value = cleanDato(datos[key]);
+    if (value) return value;
+  }
+
+  return fallback;
 }
 
 export function normalizePhoneForLiveNos(value: string): string {
@@ -131,11 +154,15 @@ export function filterByInbox(conv: ConversationVM, inbox: InboxKey): boolean {
   if (conv.deleted_at || conv.archived_at || conv.closed_at) return false;
 
   if (inbox === "sin_atender") {
-    return !conv.assigned_to || conv.estado_gestion === "sin_atender";
+    return !conv.assigned_to || conv.estado_gestion === "sin_atender" || conv.inbox === "sin_atender";
   }
 
   if (inbox === "en_gestion") {
-    return Boolean(conv.assigned_to) || conv.estado_gestion === "en_gestion";
+    return (
+      Boolean(conv.assigned_to) ||
+      conv.estado_gestion === "en_gestion" ||
+      conv.inbox === "vendedor"
+    );
   }
 
   if (inbox === "cande") {
@@ -148,8 +175,6 @@ export function filterByInbox(conv: ConversationVM, inbox: InboxKey): boolean {
 
   return true;
 }
-
-
 
 export function getMessageRole(message: Mensaje): MessageRole {
   const sender = String(message.sender_kind || "").toLowerCase();
@@ -278,4 +303,10 @@ export function canSendAsWhatsappAudio(mimeType: string): boolean {
     clean.includes("aac") ||
     clean.includes("amr")
   ) && !clean.includes("webm");
+}
+
+export function getScoreLabel(score: number): string {
+  if (score >= 75) return "Caliente";
+  if (score >= 45) return "Tibia";
+  return "Fría";
 }

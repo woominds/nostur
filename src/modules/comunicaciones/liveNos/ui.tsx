@@ -1,5 +1,13 @@
 import type { ReactNode } from "react";
-import { Bell, CalendarClock, Clock3, FileText } from "lucide-react";
+import {
+  Bell,
+  CalendarClock,
+  Clock3,
+  FileText,
+  Loader2,
+  Search,
+  Sparkles
+} from "lucide-react";
 import { EmptyState, Pill } from "../comunicacionesShared";
 import type {
   ConversationVM,
@@ -17,17 +25,16 @@ import {
   getVendedorName,
   isWindowOpen
 } from "./helpers";
-import { Sparkles, Loader2, Search, } from "lucide-react";
-
 
 export function StatusPill({ conv }: { conv: ConversationVM }) {
   if (conv.deleted_at) return <Pill>Eliminada</Pill>;
   if (conv.archived_at) return <Pill>Archivada</Pill>;
   if (conv.closed_at) return <Pill>Cerrada</Pill>;
+  if (conv.estado_gestion === "sin_atender" || !conv.assigned_to) return <Pill>Sin atender</Pill>;
   if (conv.oportunidad?.cande_activa) return <Pill>Cande activa</Pill>;
   if (conv.assigned_to) return <Pill>En gestión</Pill>;
 
-  return <Pill>Sin atender</Pill>;
+  return <Pill>Abierta</Pill>;
 }
 
 export function HeaderButton({
@@ -112,10 +119,7 @@ export function MessageStatusIcon({ message }: { message: Mensaje }) {
 
   if (status === "sent") {
     return (
-      <span
-        title="Enviado"
-        className="inline-flex items-center text-[13px] font-black leading-none text-white/75"
-      >
+      <span title="Enviado" className="inline-flex items-center text-[13px] font-black leading-none text-white/75">
         ✓
       </span>
     );
@@ -123,10 +127,7 @@ export function MessageStatusIcon({ message }: { message: Mensaje }) {
 
   if (status === "delivered") {
     return (
-      <span
-        title="Entregado"
-        className="inline-flex items-center text-[13px] font-black leading-none tracking-[-0.18em] text-white/85"
-      >
+      <span title="Entregado" className="inline-flex items-center text-[13px] font-black leading-none tracking-[-0.18em] text-white/85">
         ✓✓
       </span>
     );
@@ -134,10 +135,7 @@ export function MessageStatusIcon({ message }: { message: Mensaje }) {
 
   if (status === "read") {
     return (
-      <span
-        title="Leído"
-        className="inline-flex items-center text-[13px] font-black leading-none tracking-[-0.18em] text-[#38d5ff]"
-      >
+      <span title="Leído" className="inline-flex items-center text-[13px] font-black leading-none tracking-[-0.18em] text-[#38d5ff]">
         ✓✓
       </span>
     );
@@ -247,6 +245,7 @@ export function ConversationCard({
     </button>
   );
 }
+
 export function InboxList({
   activeInbox,
   inboxCounts,
@@ -263,54 +262,60 @@ export function InboxList({
       </div>
 
       <div className="space-y-1.5">
-        {INBOXES.map((inbox) => (
-          <button
-            key={inbox.id}
-            type="button"
-            onClick={() => onChangeInbox(inbox.id)}
-            className={[
-              "flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left transition",
-              activeInbox === inbox.id
-                ? "bg-[#4f7c90] text-white shadow-sm"
-                : "text-[#475569] hover:bg-[#eef6f7] hover:text-[#142033]"
-            ].join(" ")}
-          >
-            <span className="shrink-0">{inbox.icon}</span>
+        {INBOXES.map((inbox) => {
+          const count = inboxCounts[inbox.id] || 0;
+          const active = activeInbox === inbox.id;
+          const amberAlert = inbox.id === "sin_atender" && count > 0 && !active;
 
-            <span className="min-w-0 flex-1">
-              <span className="block text-xs font-black">{inbox.label}</span>
-              <span
-                className={[
-                  "block truncate text-[10px] font-bold",
-                  activeInbox === inbox.id ? "text-white/75" : "text-[#94a3b8]"
-                ].join(" ")}
-              >
-                {inbox.description}
-              </span>
-            </span>
-
-            <span
+          return (
+            <button
+              key={inbox.id}
+              type="button"
+              onClick={() => onChangeInbox(inbox.id)}
               className={[
-                "flex h-6 min-w-6 items-center justify-center rounded-full px-1 text-[10px] font-black",
-                activeInbox === inbox.id
-                  ? "bg-white/20 text-white"
-                  : "bg-[#eef2f7] text-[#475569]"
+                "flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left transition",
+                active
+                  ? "bg-[#4f7c90] text-white shadow-sm"
+                  : amberAlert
+                    ? "border border-amber-300 bg-amber-50 text-amber-900 shadow-sm animate-pulse"
+                    : "text-[#475569] hover:bg-[#eef6f7] hover:text-[#142033]"
               ].join(" ")}
             >
-              {inboxCounts[inbox.id] || 0}
-            </span>
-          </button>
-        ))}
+              <span className="shrink-0">{inbox.icon}</span>
+
+              <span className="min-w-0 flex-1">
+                <span className="block text-xs font-black">{inbox.label}</span>
+                <span
+                  className={[
+                    "block truncate text-[10px] font-bold",
+                    active ? "text-white/75" : amberAlert ? "text-amber-700" : "text-[#94a3b8]"
+                  ].join(" ")}
+                >
+                  {inbox.description}
+                </span>
+              </span>
+
+              <span
+                className={[
+                  "flex h-6 min-w-6 items-center justify-center rounded-full px-1 text-[10px] font-black",
+                  active
+                    ? "bg-white/20 text-white"
+                    : amberAlert
+                      ? "bg-amber-400 text-white"
+                      : "bg-[#eef2f7] text-[#475569]"
+                ].join(" ")}
+              >
+                {count}
+              </span>
+            </button>
+          );
+        })}
       </div>
     </section>
   );
 }
 
-export function SellersList({
-  profiles
-}: {
-  profiles: ProfileLite[];
-}) {
+export function SellersList({ profiles }: { profiles: ProfileLite[] }) {
   return (
     <section className="shrink-0 rounded-[26px] border border-black/10 bg-white/80 p-3 shadow-sm">
       <div className="mb-3 px-1 text-[11px] font-black uppercase tracking-[0.14em] text-[#64748b]">
@@ -323,10 +328,7 @@ export function SellersList({
             key={profile.id}
             className="flex items-center gap-2 rounded-2xl px-2 py-2 text-xs font-bold text-[#475569]"
           >
-            <span
-              className="h-2.5 w-2.5 rounded-full"
-              style={{ backgroundColor: profile.color || "#4f7c90" }}
-            />
+            <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: profile.color || "#4f7c90" }} />
             <span className="truncate">{getVendedorName(profile)}</span>
           </div>
         ))}
@@ -335,11 +337,7 @@ export function SellersList({
   );
 }
 
-export function NiaSidebarCard({
-  onOpenNia
-}: {
-  onOpenNia: () => void;
-}) {
+export function NiaSidebarCard({ onOpenNia }: { onOpenNia: () => void }) {
   return (
     <section className="rounded-[26px] border border-black/10 bg-white/80 p-4 shadow-sm">
       <div className="flex items-center gap-3">
@@ -398,8 +396,7 @@ export function ConversationsColumn({
         </div>
 
         <div className="mt-2 text-xs font-bold text-[#64748b]">
-          {filteredConversations.length} conversaciones en{" "}
-          {INBOXES.find((item) => item.id === activeInbox)?.label}
+          {filteredConversations.length} conversaciones en {INBOXES.find((item) => item.id === activeInbox)?.label}
         </div>
       </div>
 
@@ -409,10 +406,7 @@ export function ConversationsColumn({
             <Loader2 size={22} className="animate-spin text-[#4f7c90]" />
           </div>
         ) : filteredConversations.length === 0 ? (
-          <EmptyState
-            title="Sin conversaciones"
-            subtitle="Cuando ingresen mensajes por WhatsApp aparecerán en esta bandeja."
-          />
+          <EmptyState title="Sin conversaciones" subtitle="Cuando ingresen mensajes por WhatsApp aparecerán en esta bandeja." />
         ) : (
           filteredConversations.map((conv) => (
             <ConversationCard
@@ -477,11 +471,7 @@ export function LiveNosSidebar({
     <aside className="flex min-h-0 flex-col gap-4 overflow-hidden">
       <NiaSidebarCard onOpenNia={onOpenNia} />
 
-      <InboxList
-        activeInbox={activeInbox}
-        inboxCounts={inboxCounts}
-        onChangeInbox={onChangeInbox}
-      />
+      <InboxList activeInbox={activeInbox} inboxCounts={inboxCounts} onChangeInbox={onChangeInbox} />
 
       <SellersList profiles={profiles} />
     </aside>

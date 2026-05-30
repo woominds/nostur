@@ -1,26 +1,34 @@
 // @ts-nocheck
 
 /* =========================================================
-   NOSSIX / NOSTUR — nia-chat
-   NIA · Asistente interno comercial
+   NOSSIX / NOSTUR — cande-reply
+   CANDE · Asistente de pasajeros por WhatsApp
 
-   Hace:
-   - autentica usuario por JWT si viene Authorization
-   - lee contexto puntual de LiveNos si hay conversation_id
-   - si NO hay conversation_id, lee contexto comercial general
-   - lee feedback positivo/negativo de nia_interacciones como entrenamiento operativo
-   - responde con OpenAI si hay OPENAI_API_KEY
-   - ejecuta acciones explícitas:
-     marcar urgente, pausar/activar CANDE, tomar conversación,
-     crear nota interna, crear recordatorio, cambiar estado pipeline
-   - permite cambiar estado de pipeline desde Oportunidades usando nombre:
-     "pasa batica a presupuestada", "pasar Alan a en gestión"
-   - guarda auditoría en nia_interacciones
-   - devuelve audit_id para feedback desde el widget
+   Flujo:
+   WhatsApp inbound
+   → whatsapp-webhook
+   → cande-reply
+   → analiza datos / score
+   → OpenAI
+   → fallback seguro si OpenAI devuelve rechazo
+   → mensajes sender_kind = cande
+   → whatsapp-send-message
+   → cande_runs
+
+   Fuente de verdad:
+   - cande_config
+   - cande_campos
+   - cande_faqs
+   - cande_palabras_clave
+   - lead_oportunidades
+   - conversaciones
+   - mensajes
 ========================================================= */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+const CODE_VERSION = "cande-reply-safe-score-v1";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -56,10 +64,7 @@ function normalizeForIntent(value: string): string {
   return cleanText(value)
     .toLowerCase()
     .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^\w\s+]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+    .replace(/[\u0300-\u036f]/g, "");
 }
 
 function getSupabaseAdmin() {
@@ -79,44 +84,31 @@ function getSupabaseAdmin() {
   });
 }
 
-function getSupabaseUserClient(req: Request) {
-  const supabaseUrl = Deno.env.get("SUPABASE_URL");
-  const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
+function getEnvSupabaseUrl() {
+  const value = Deno.env.get("SUPABASE_URL");
 
-  if (!supabaseUrl || !anonKey) return null;
-
-  const authorization = req.headers.get("Authorization") || "";
-
-  if (!authorization) return null;
-
-  return createClient(supabaseUrl, anonKey, {
-    global: {
-      headers: {
-        Authorization: authorization
-      }
-    },
-    auth: {
-      persistSession: false,
-      autoRefreshToken: false
-    }
-  });
-}
-
-async function getAuthUserId(req: Request): Promise<string | null> {
-  try {
-    const client = getSupabaseUserClient(req);
-
-    if (!client) return null;
-
-    const { data, error } = await client.auth.getUser();
-
-    if (error) return null;
-
-    return data.user?.id || null;
-  } catch {
-    return null;
+  if (!value) {
+    throw new Error("Falta SUPABASE_URL.");
   }
+
+  return value;
 }
+
+function getEnvServiceRoleKey() {
+  const value =
+    Deno.env.get("NOSTUR_SERVICE_ROLE_KEY") ||
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+
+  if (!value) {
+    throw new Error("Falta NOSTUR_SERVICE_ROLE_KEY o SUPABASE_SERVICE_ROLE_KEY.");
+  }
+
+  return value;
+}
+
+/* =========================================================
+   PAYLOAD HELPERS
+========================================================= */
 
 function getConversationId(payload: any): string | null {
   return (
@@ -128,6 +120,29 @@ function getConversationId(payload: any): string | null {
   );
 }
 
+function getInboundMessageId(payload: any): string | null {
+  return (
+    cleanText(payload.inbound_message_id) ||
+    cleanText(payload.mensaje_id) ||
+    cleanText(payload.message_id) ||
+    cleanText(payload.context?.inbound_message_id) ||
+    cleanText(payload.context?.mensaje_id) ||
+    null
+  );
+}
+
+function getOportunidadId(payload: any): string | null {
+  return (
+    cleanText(payload.oportunidad_id) ||
+    cleanText(payload.context?.oportunidad_id) ||
+    null
+  );
+}
+
+/* =========================================================
+   FORMATTERS
+========================================================= */
+
 function formatJson(value: unknown): string {
   if (!value) return "—";
 
@@ -138,15 +153,81 @@ function formatJson(value: unknown): string {
   }
 }
 
+function formatList(value: unknown): string {
+  if (!value) return "—";
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "—";
+    return value.map((item) => `- ${cleanText(item) || formatJson(item)}`).join("\n");
+  }
+
+  if (typeof value === "object") {
+    return formatJson(value);
+  }
+
+  return cleanText(value) || "—";
+}
+
+function formatRowsForPrompt(rows: any[], fallback = "—"): string {
+  if (!rows || rows.length === 0) return fallback;
+
+  return rows
+    .map((row, index) => {
+      const nombre =
+        cleanText(row.nombre) ||
+        cleanText(row.titulo) ||
+        cleanText(row.keyword) ||
+        cleanText(row.palabra) ||
+        cleanText(row.clave) ||
+        cleanText(row.campo) ||
+        `Item ${index + 1}`;
+
+      const descripcion =
+        cleanText(row.descripcion) ||
+        cleanText(row.respuesta) ||
+        cleanText(row.valor) ||
+        cleanText(row.prompt) ||
+        cleanText(row.texto) ||
+        cleanText(row.etiqueta) ||
+        "";
+
+      const extra = Object.entries(row || {})
+        .filter(
+          ([key]) =>
+            ![
+              "id",
+              "created_at",
+              "updated_at",
+              "nombre",
+              "titulo",
+              "keyword",
+              "palabra",
+              "clave",
+              "campo",
+              "descripcion",
+              "respuesta",
+              "valor",
+              "prompt",
+              "texto",
+              "etiqueta"
+            ].includes(key)
+        )
+        .map(([key, value]) => `${key}: ${typeof value === "object" ? JSON.stringify(value) : cleanText(value)}`)
+        .filter((item) => cleanText(item))
+        .join(" · ");
+
+      return `- ${nombre}${descripcion ? `: ${descripcion}` : ""}${extra ? ` (${extra})` : ""}`;
+    })
+    .join("\n");
+}
+
 function formatMessageForPrompt(message: any): string {
   const direction =
     message.direction === "in" || message.direction === "inbound"
       ? "PASAJERO"
       : message.sender_kind === "cande"
         ? "CANDE"
-        : message.sender_kind === "nia"
-          ? "NIA"
-          : "VENDEDOR";
+        : "ASESOR";
 
   const type = cleanText(message.type) || "text";
   const text = cleanText(message.text) || `[${type}]`;
@@ -155,367 +236,903 @@ function formatMessageForPrompt(message: any): string {
   return `[${at}] ${direction}: ${text}`;
 }
 
-async function loadConversationContext(params: {
+function normalizeWhatsappText(text: string): string {
+  return cleanText(text)
+    .replace(/\*\*/g, "")
+    .replace(/^#+\s?/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/* =========================================================
+   MESSAGE HELPERS
+========================================================= */
+
+function isInbound(message: any) {
+  return message?.direction === "in" || message?.direction === "inbound";
+}
+
+function isOutbound(message: any) {
+  return message?.direction === "out" || message?.direction === "outbound";
+}
+
+function isGreetingOnly(text: string): boolean {
+  const normalized = normalizeForIntent(text);
+
+  return [
+    "hola",
+    "holi",
+    "holis",
+    "holaa",
+    "holaaa",
+    "buen dia",
+    "buenas",
+    "buenas tardes",
+    "buenas noches",
+    "hello",
+    "hi"
+  ].includes(normalized);
+}
+
+/* =========================================================
+   CONFIG HELPERS
+========================================================= */
+
+function getConfigValue(config: any, key: string, fallback: string) {
+  return cleanText(config?.[key]) || fallback;
+}
+
+function getMarcaVisible(config: any) {
+  return getConfigValue(config, "marca_visible", "ALMUNDO Franquicia Córdoba");
+}
+
+function getNombreIa(config: any) {
+  return getConfigValue(config, "nombre_ia", "Cande");
+}
+
+function getMensajeInicial(config: any) {
+  return getConfigValue(
+    config,
+    "mensaje_inicial",
+    `Hola, soy ${getNombreIa(config)} de ${getMarcaVisible(config)} 😊 ¿En qué puedo ayudarte con tu viaje?`
+  );
+}
+
+function getMensajeFaltaInfo(config: any) {
+  return getConfigValue(
+    config,
+    "mensaje_falta_info",
+    "Para ayudarte mejor, ¿me contás destino, fecha aproximada y cantidad de pasajeros?"
+  );
+}
+
+function getMensajeNoEntiende(config: any) {
+  return getConfigValue(
+    config,
+    "mensaje_no_entiende",
+    "Perdón, no llegué a entender bien. ¿Me lo podés repetir con destino, fecha aproximada o tipo de viaje?"
+  );
+}
+
+function getMensajeFueraHorario(config: any) {
+  return getConfigValue(
+    config,
+    "mensaje_fuera_horario",
+    "Gracias por escribirnos 😊 En este momento el equipo no está disponible, pero puedo tomar tus datos para que un asesor te responda apenas pueda."
+  );
+}
+
+function getMensajeDerivacion(config: any) {
+  return getConfigValue(
+    config,
+    "mensaje_despedida",
+    "Genial, te paso con un asesor del equipo que ya va a tener tu información. ¡Gracias!"
+  );
+}
+
+/* =========================================================
+   CANDE_RUNS
+========================================================= */
+
+async function createRun(params: {
   supabase: any;
   conversationId: string | null;
+  oportunidadId: string | null;
+  inboundMessageId: string | null;
+  payload: any;
 }) {
-  if (!params.conversationId) {
+  const { data, error } = await params.supabase
+    .from("cande_runs")
+    .insert({
+      conversation_id: params.conversationId,
+      oportunidad_id: params.oportunidadId,
+      inbound_message_id: params.inboundMessageId,
+      source: cleanText(params.payload?.source) || "cande-reply",
+      status: "started",
+      request_payload: params.payload || {},
+      response_payload: {
+        code_version: CODE_VERSION
+      }
+    })
+    .select("id")
+    .single();
+
+  if (error) {
+    console.error("[cande-reply] No se pudo crear cande_runs:", error.message);
+    return null;
+  }
+
+  return data?.id || null;
+}
+
+async function finishRun(params: {
+  supabase: any;
+  runId: string | null;
+  status: string;
+  reason?: string | null;
+  outboundMessageId?: string | null;
+  responsePayload?: any;
+  error?: string | null;
+}) {
+  if (!params.runId) return;
+
+  const { error } = await params.supabase
+    .from("cande_runs")
+    .update({
+      status: params.status,
+      reason: params.reason || null,
+      outbound_message_id: params.outboundMessageId || null,
+      response_payload: {
+        code_version: CODE_VERSION,
+        ...(params.responsePayload || {})
+      },
+      error: params.error || null,
+      finished_at: new Date().toISOString()
+    })
+    .eq("id", params.runId);
+
+  if (error) {
+    console.error("[cande-reply] No se pudo cerrar cande_runs:", error.message);
+  }
+}
+
+/* =========================================================
+   LOADERS
+========================================================= */
+
+async function loadCandeConfig(params: { supabase: any }) {
+  const { data, error } = await params.supabase
+    .from("cande_config")
+    .select("*")
+    .order("updated_at", { ascending: false, nullsFirst: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+
+  return data || null;
+}
+
+async function loadCandeCampos(params: { supabase: any }) {
+  const { data, error } = await params.supabase
+    .from("cande_campos")
+    .select("*")
+    .order("orden", { ascending: true, nullsFirst: false });
+
+  if (error) {
+    console.error("[cande-reply] No se pudieron leer cande_campos:", error.message);
+    return [];
+  }
+
+  return data || [];
+}
+
+async function loadCandeFaqs(params: { supabase: any }) {
+  const { data, error } = await params.supabase
+    .from("cande_faqs")
+    .select("*")
+    .order("updated_at", { ascending: false, nullsFirst: false })
+    .limit(80);
+
+  if (error) {
+    console.error("[cande-reply] No se pudieron leer cande_faqs:", error.message);
+    return [];
+  }
+
+  return data || [];
+}
+
+async function loadCandePalabrasClave(params: { supabase: any }) {
+  const { data, error } = await params.supabase
+    .from("cande_palabras_clave")
+    .select("*")
+    .order("updated_at", { ascending: false, nullsFirst: false })
+    .limit(100);
+
+  if (error) {
+    console.error("[cande-reply] No se pudieron leer cande_palabras_clave:", error.message);
+    return [];
+  }
+
+  return data || [];
+}
+
+async function loadConversation(params: {
+  supabase: any;
+  conversationId: string;
+}) {
+  const { data, error } = await params.supabase
+    .from("conversaciones")
+    .select("*")
+    .eq("id", params.conversationId)
+    .maybeSingle();
+
+  if (error) throw error;
+
+  return data || null;
+}
+
+async function loadOpportunity(params: {
+  supabase: any;
+  conversationId: string;
+  oportunidadId?: string | null;
+}) {
+  let query = params.supabase.from("lead_oportunidades").select("*");
+
+  if (params.oportunidadId) {
+    query = query.eq("id", params.oportunidadId);
+  } else {
+    query = query.eq("conversacion_id", params.conversationId);
+  }
+
+  const { data, error } = await query.maybeSingle();
+
+  if (error) throw error;
+
+  return data || null;
+}
+
+async function loadMessages(params: {
+  supabase: any;
+  conversationId: string;
+}) {
+  const { data, error } = await params.supabase
+    .from("mensajes")
+    .select("id,direction,sender_kind,type,text,status,error,wa_message_id,wa_timestamp,created_at,deleted_at")
+    .eq("conversacion_id", params.conversationId)
+    .is("deleted_at", null)
+    .order("wa_timestamp", { ascending: false, nullsFirst: false })
+    .order("created_at", { ascending: false })
+    .limit(35);
+
+  if (error) throw error;
+
+  return (data || []).slice().reverse();
+}
+
+async function loadInboundMessage(params: {
+  supabase: any;
+  inboundMessageId: string | null;
+}) {
+  if (!params.inboundMessageId) return null;
+
+  const { data, error } = await params.supabase
+    .from("mensajes")
+    .select("*")
+    .eq("id", params.inboundMessageId)
+    .maybeSingle();
+
+  if (error) throw error;
+
+  return data || null;
+}
+
+/* =========================================================
+   GATE
+========================================================= */
+
+function shouldCandeReply(params: {
+  config: any;
+  conversation: any;
+  opportunity: any;
+  messages: any[];
+  inboundMessage: any | null;
+}) {
+  const conversation = params.conversation;
+  const opportunity = params.opportunity;
+  const messages = params.messages || [];
+  const inboundMessage = params.inboundMessage;
+
+  if (!conversation?.id) {
     return {
-      conversation: null,
-      messages: []
+      ok: false,
+      reason: "conversation_not_found"
     };
   }
 
-  const [conversationRes, messagesRes] = await Promise.all([
-    params.supabase
-      .from("conversaciones")
-      .select("*")
-      .eq("id", params.conversationId)
-      .maybeSingle(),
-
-    params.supabase
-      .from("mensajes")
-      .select("id,direction,type,text,media,status,error,wa_message_id,sender_profile_id,sender_kind,wa_timestamp,created_at")
-      .eq("conversacion_id", params.conversationId)
-      .is("deleted_at", null)
-      .order("wa_timestamp", { ascending: false })
-      .limit(30)
-  ]);
-
-  if (conversationRes.error) throw conversationRes.error;
-  if (messagesRes.error) throw messagesRes.error;
-
-  return {
-    conversation: conversationRes.data || null,
-    messages: (messagesRes.data || []).slice().reverse()
-  };
-}
-
-async function loadNiaTrainingMemory(params: { supabase: any }) {
-  const [negativeRes, positiveRes] = await Promise.all([
-    params.supabase
-      .from("nia_interacciones")
-      .select("id,created_at,user_message,assistant_response,feedback_rating,feedback_comment,feedback_created_at,module,source,tool,metadata")
-      .eq("feedback_rating", "negative")
-      .not("feedback_comment", "is", null)
-      .order("feedback_created_at", { ascending: false, nullsFirst: false })
-      .limit(12),
-
-    params.supabase
-      .from("nia_interacciones")
-      .select("id,created_at,user_message,assistant_response,feedback_rating,feedback_comment,feedback_created_at,module,source,tool,metadata")
-      .eq("feedback_rating", "positive")
-      .order("feedback_created_at", { ascending: false, nullsFirst: false })
-      .limit(6)
-  ]);
-
-  if (negativeRes.error) throw negativeRes.error;
-  if (positiveRes.error) throw positiveRes.error;
-
-  return {
-    negative_feedback: negativeRes.data || [],
-    positive_feedback: positiveRes.data || []
-  };
-}
-
-async function loadGeneralCommercialContext(params: { supabase: any }) {
-  const [
-    openConversationsRes,
-    unattendedConversationsRes,
-    oportunidadesRes,
-    profilesRes,
-    trainingMemory
-  ] = await Promise.all([
-    params.supabase
-      .from("conversaciones")
-      .select(`
-        id,
-        contacto_id,
-        wa_phone,
-        titulo,
-        subject,
-        estado_gestion,
-        estado_comercial,
-        inbox,
-        status,
-        assigned_to,
-        last_message_preview,
-        last_message_at,
-        last_inbound_message_at,
-        last_outbound_message_at,
-        whatsapp_24h_expires_at,
-        created_at,
-        updated_at
-      `)
-      .is("deleted_at", null)
-      .is("archived_at", null)
-      .is("closed_at", null)
-      .eq("status", "open")
-      .order("last_message_at", { ascending: false, nullsFirst: false })
-      .limit(30),
-
-    params.supabase
-      .from("conversaciones")
-      .select(`
-        id,
-        contacto_id,
-        wa_phone,
-        titulo,
-        subject,
-        estado_gestion,
-        estado_comercial,
-        inbox,
-        status,
-        assigned_to,
-        last_message_preview,
-        last_message_at,
-        last_inbound_message_at,
-        last_outbound_message_at,
-        whatsapp_24h_expires_at,
-        created_at,
-        updated_at
-      `)
-      .is("deleted_at", null)
-      .is("archived_at", null)
-      .is("closed_at", null)
-      .eq("status", "open")
-      .is("assigned_to", null)
-      .order("last_message_at", { ascending: false, nullsFirst: false })
-      .limit(20),
-
-    params.supabase
-      .from("lead_oportunidades")
-      .select(`
-        id,
-        conversacion_id,
-        estado_id,
-        score,
-        datos,
-        assigned_to,
-        cande_activa,
-        transferida_at,
-        cande_handoff_requested_at,
-        last_score_at,
-        created_at,
-        updated_at
-      `)
-      .order("updated_at", { ascending: false })
-      .limit(40),
-
-    params.supabase
-      .from("profiles")
-      .select("id,nombre,apellido,email,color,activo,nombre_publico_whatsapp")
-      .eq("activo", true),
-
-    loadNiaTrainingMemory({ supabase: params.supabase })
-  ]);
-
-  if (openConversationsRes.error) throw openConversationsRes.error;
-  if (unattendedConversationsRes.error) throw unattendedConversationsRes.error;
-  if (oportunidadesRes.error) throw oportunidadesRes.error;
-  if (profilesRes.error) throw profilesRes.error;
-
-  const openConversations = openConversationsRes.data || [];
-  const unattendedConversations = unattendedConversationsRes.data || [];
-  const oportunidades = oportunidadesRes.data || [];
-  const profiles = profilesRes.data || [];
-
-  const profilesMap = new Map<string, any>();
-
-  profiles.forEach((profile: any) => {
-    if (profile.id) {
-      profilesMap.set(profile.id, profile);
-    }
-  });
-
-  const oportunidadesByConversationId = new Map<string, any>();
-
-  oportunidades.forEach((item: any) => {
-    if (item.conversacion_id) {
-      oportunidadesByConversationId.set(item.conversacion_id, item);
-    }
-  });
-
-  function getVendedorForConversation(conv: any) {
-    if (!conv.assigned_to) {
-      return {
-        vendedor: null,
-        vendedor_nombre: null,
-        tiene_vendedor_asignado: false
-      };
-    }
-
-    const profile = profilesMap.get(conv.assigned_to) || null;
-
-    if (!profile) {
-      return {
-        vendedor: null,
-        vendedor_nombre: "Vendedor asignado",
-        tiene_vendedor_asignado: true
-      };
-    }
-
-    const vendedorNombre = `${cleanText(profile.nombre)} ${cleanText(profile.apellido)}`.trim();
-
+  if (conversation.deleted_at || conversation.archived_at || conversation.closed_at || conversation.status === "closed") {
     return {
-      vendedor: profile,
-      vendedor_nombre: vendedorNombre || "Vendedor asignado",
-      tiene_vendedor_asignado: true
+      ok: false,
+      reason: "conversation_closed_or_archived"
     };
   }
 
-  const openConversationsWithOpportunity = openConversations.map((conv: any) => {
-    const vendedorInfo = getVendedorForConversation(conv);
-
+  if (!opportunity?.id) {
     return {
-      ...conv,
-      ...vendedorInfo,
-      oportunidad: oportunidadesByConversationId.get(conv.id) || null
+      ok: false,
+      reason: "opportunity_not_found"
     };
-  });
+  }
 
-  const unattendedConversationsWithOpportunity = unattendedConversations.map((conv: any) => {
-    const vendedorInfo = getVendedorForConversation(conv);
-
+  if (opportunity.cande_activa !== true) {
     return {
-      ...conv,
-      ...vendedorInfo,
-      oportunidad: oportunidadesByConversationId.get(conv.id) || null
+      ok: false,
+      reason: "cande_not_active_for_opportunity"
     };
-  });
+  }
 
-  const activeOpportunities = oportunidades.filter((item: any) => {
-    const score = Number(item.score || 0);
-    const hasData = item.datos && Object.keys(item.datos || {}).length > 0;
+  if (inboundMessage && !isInbound(inboundMessage)) {
+    return {
+      ok: false,
+      reason: "message_is_not_inbound"
+    };
+  }
 
-    return Boolean(item.conversacion_id) || score > 0 || hasData || item.cande_activa;
-  });
+  const lastInbound = [...messages].reverse().find((message) => isInbound(message));
+  const lastOutbound = [...messages].reverse().find((message) => isOutbound(message));
+
+  if (!lastInbound?.id) {
+    return {
+      ok: false,
+      reason: "no_inbound_message"
+    };
+  }
+
+  const inboundDate = new Date(lastInbound.wa_timestamp || lastInbound.created_at || 0).getTime();
+  const outboundDate = lastOutbound
+    ? new Date(lastOutbound.wa_timestamp || lastOutbound.created_at || 0).getTime()
+    : 0;
+
+  if (lastOutbound?.sender_kind === "cande" && outboundDate >= inboundDate) {
+    return {
+      ok: false,
+      reason: "cande_already_replied_after_last_inbound"
+    };
+  }
+
+  if (lastOutbound && outboundDate >= inboundDate) {
+    return {
+      ok: false,
+      reason: "human_or_agent_already_replied_after_last_inbound"
+    };
+  }
 
   return {
-    open_conversations_count: openConversationsWithOpportunity.length,
-    unattended_conversations_count: unattendedConversationsWithOpportunity.length,
-    opportunities_count: activeOpportunities.length,
-    open_conversations: openConversationsWithOpportunity,
-    unattended_conversations: unattendedConversationsWithOpportunity,
-    opportunities: activeOpportunities,
-    training_memory: trainingMemory,
-    recent_negative_feedback: trainingMemory.negative_feedback,
-    recent_positive_feedback: trainingMemory.positive_feedback
+    ok: true,
+    reason: "cande_active"
   };
 }
 
-function buildSystemPrompt() {
-  return `
-Sos NIA, el asistente comercial interno de NOSSIX / NOSTUR.
+/* =========================================================
+   DERIVACIÓN
+========================================================= */
 
-Tu usuario es un vendedor, gerente o administrador interno de una agencia de viajes.
-No hablás con pasajeros finales. CANDE habla con pasajeros; NIA habla con el equipo interno.
+function shouldDeriveByMessage(params: {
+  config: any;
+  messages: any[];
+  inboundMessage: any | null;
+  score?: number;
+}) {
+  const config = params.config || {};
+  const inboundText = normalizeForIntent(params.inboundMessage?.text || "");
 
-IDENTIDAD Y ROLES:
-- La asistente de pasajeros se llama CANDE. Nunca escribas CADE.
-- CANDE habla con pasajeros.
-- NIA habla con el equipo interno.
-- Diferenciá siempre entre "pasajero/contacto", "vendedor asignado", "gerencia" y "administración".
-- Si el pasajero y el vendedor tienen el mismo nombre, aclaralo y no asumas que son la misma persona operativamente.
+  const wantsHuman =
+    inboundText.includes("asesor") ||
+    inboundText.includes("persona") ||
+    inboundText.includes("humano") ||
+    inboundText.includes("vendedor") ||
+    inboundText.includes("agente") ||
+    inboundText.includes("llamen") ||
+    inboundText.includes("llamar") ||
+    inboundText.includes("quiero hablar") ||
+    inboundText.includes("hablar con alguien");
 
-REGLAS DE CONTEXTO:
-- Si una conversación tiene assigned_to con valor, no digas que no tiene vendedor asignado.
-- Si la conversación trae vendedor_nombre, usá ese nombre como vendedor asignado.
-- Si assigned_to existe pero no hay vendedor_nombre, decí "tiene vendedor asignado" y no "sin vendedor".
-- Diferenciá "sin vendedor asignado" de "en gestión".
-- Una conversación en inbox vendedor o estado_gestion en_gestion no debe tratarse como sin atender.
-- No digas "derivar a CANDE" si CANDE ya está activa; en ese caso sugerí "mantener CANDE activa" o "pedir a CANDE que continúe indagando".
+  if (config.derivar_si_pide_humano === true && wantsHuman) {
+    return {
+      shouldDerive: true,
+      reason: "passenger_requested_human"
+    };
+  }
 
-ENTRENAMIENTO OPERATIVO CON FEEDBACK:
-- El panel de feedback de NIA es una fuente de aprendizaje operativo.
-- Usá el feedback negativo reciente como corrección prioritaria.
-- Si un feedback negativo contradice una respuesta anterior, no repitas ese error.
-- Si el feedback negativo dice que había una conversación, oportunidad, vendedor o estado que ignoraste, prestá especial atención a esos campos en el contexto.
-- Usá el feedback positivo reciente como ejemplo de estilo y criterio.
-- El feedback cargado por el equipo de NOSSIX tiene prioridad sobre inferencias generales del modelo.
-- No digas que estás "aprendiendo" ni expliques el mecanismo interno; simplemente aplicá las correcciones.
+  const maxMessages = Number(config.max_mensajes_antes_derivar || 0);
 
-ACCIONES DIRECTAS:
-- Si el usuario da una orden directa como "pausá CANDE", "desactivá CANDE", "activá CANDE", "marcá urgente", "tomá la conversación", "creá nota", "creá recordatorio" o "cambiá el estado", no pidas confirmación.
-- Solo pedí aclaración si falta identificar una conversación, una oportunidad concreta o un estado de pipeline válido.
-- No respondas con "¿confirmás que procedo?" cuando el usuario ya dio una instrucción directa.
-- No prometas acciones que todavía no fueron ejecutadas.
+  if (maxMessages > 0) {
+    const candeOutboundCount = (params.messages || []).filter(
+      (message) => isOutbound(message) && message.sender_kind === "cande"
+    ).length;
 
-FUNCIÓN DE NIA:
-- resumir conversaciones comerciales
-- detectar intención de compra
-- detectar si falta respuesta del vendedor
-- detectar conversaciones abiertas, sin atender o sin asignar
-- detectar oportunidades activas o en gestión
-- sugerir próxima acción concreta
-- proponer respuestas listas para copiar y pegar, indicando si son para el pasajero, para el vendedor o para uso interno
-- detectar si conviene activar, pausar o mantener CANDE
-- ayudar al vendedor a ordenar oportunidad, datos faltantes y urgencias
+    if (candeOutboundCount >= maxMessages) {
+      return {
+        shouldDerive: true,
+        reason: "max_cande_messages_reached"
+      };
+    }
+  }
 
-ESTILO:
-- Respondé en español de Argentina.
-- Sé concreta, ejecutiva y comercial.
+  const score = Number(params.score || 0);
+  const threshold = Number(config.umbral_transferencia || 0);
+
+  if (config.derivar_si_score_supera_umbral === true && threshold > 0 && score >= threshold) {
+    return {
+      shouldDerive: true,
+      reason: "score_threshold_reached"
+    };
+  }
+
+  return {
+    shouldDerive: false,
+    reason: null
+  };
+}
+
+/* =========================================================
+   ANÁLISIS DE DATOS Y SCORE
+========================================================= */
+
+function parseJsonObjectFromText(text: string): any {
+  const clean = cleanText(text);
+
+  if (!clean) return {};
+
+  try {
+    return JSON.parse(clean);
+  } catch {
+    // continúa abajo
+  }
+
+  const match = clean.match(/\{[\s\S]*\}/);
+
+  if (!match) return {};
+
+  try {
+    return JSON.parse(match[0]);
+  } catch {
+    return {};
+  }
+}
+
+function normalizeDetectedLeadData(value: any) {
+  const detected = value && typeof value === "object" ? value : {};
+  const result: Record<string, unknown> = {};
+
+  const nombre = cleanText(detected.nombre);
+  const destino = cleanText(detected.destino);
+
+  const origen =
+    cleanText(detected.origen) ||
+    cleanText(detected.ciudad_origen) ||
+    cleanText(detected.salida_desde);
+
+  const fechasTentativas =
+    cleanText(detected.fechas_tentativas) ||
+    cleanText(detected.fecha) ||
+    cleanText(detected.fechas) ||
+    cleanText(detected.mes);
+
+  const cantidadPasajeros =
+    cleanText(detected.cantidad_pasajeros) ||
+    cleanText(detected.pax) ||
+    cleanText(detected.pasajeros) ||
+    cleanText(detected.personas);
+
+  const presupuestoAproximado =
+    cleanText(detected.presupuesto_aproximado) ||
+    cleanText(detected.presupuesto);
+
+  const tipoViaje =
+    cleanText(detected.tipo_viaje) ||
+    cleanText(detected.tipo_de_viaje);
+
+  if (nombre) result.nombre = nombre;
+  if (destino) result.destino = destino;
+  if (origen) result.origen = origen;
+  if (fechasTentativas) result.fechas_tentativas = fechasTentativas;
+  if (cantidadPasajeros) result.cantidad_pasajeros = cantidadPasajeros;
+  if (presupuestoAproximado) result.presupuesto_aproximado = presupuestoAproximado;
+  if (tipoViaje) result.tipo_viaje = tipoViaje;
+
+  return result;
+}
+
+function calculateOpportunityScore(params: {
+  campos: any[];
+  datos: Record<string, unknown>;
+}) {
+  const campos = params.campos || [];
+  const datos = params.datos || {};
+
+  let score = 0;
+
+  for (const campo of campos) {
+    const clave = cleanText(campo.clave);
+    const peso = Number(campo.peso || 0);
+
+    if (!clave || !peso) continue;
+
+    const value = datos[clave];
+
+    if (value !== null && value !== undefined && cleanText(value)) {
+      score += peso;
+    }
+  }
+
+  return Math.max(0, Math.min(100, Math.round(score)));
+}
+
+async function analyzeLeadDataFromInbound(params: {
+  config: any;
+  campos: any[];
+  conversation: any;
+  opportunity: any;
+  inboundMessage: any | null;
+}) {
+  const inboundText = cleanText(params.inboundMessage?.text);
+
+  const currentDatos =
+    params.opportunity?.datos && typeof params.opportunity.datos === "object"
+      ? params.opportunity.datos
+      : {};
+
+  const baseDatos: Record<string, unknown> = {
+    ...currentDatos,
+
+    nombre:
+      cleanText(currentDatos.nombre) ||
+      cleanText(currentDatos.contacto_nombre) ||
+      cleanText(currentDatos.pasajero) ||
+      cleanText(params.conversation?.titulo) ||
+      cleanText(params.conversation?.wa_phone) ||
+      "Sin nombre",
+
+    contacto_nombre:
+      cleanText(currentDatos.contacto_nombre) ||
+      cleanText(currentDatos.nombre) ||
+      cleanText(currentDatos.pasajero) ||
+      cleanText(params.conversation?.titulo) ||
+      cleanText(params.conversation?.wa_phone) ||
+      "Sin nombre",
+
+    pasajero:
+      cleanText(currentDatos.pasajero) ||
+      cleanText(currentDatos.nombre) ||
+      cleanText(currentDatos.contacto_nombre) ||
+      cleanText(params.conversation?.titulo) ||
+      cleanText(params.conversation?.wa_phone) ||
+      "Sin nombre",
+
+    telefono:
+      cleanText(currentDatos.telefono) ||
+      cleanText(currentDatos.wa_phone) ||
+      cleanText(params.conversation?.wa_phone) ||
+      "",
+
+    wa_phone:
+      cleanText(currentDatos.wa_phone) ||
+      cleanText(currentDatos.telefono) ||
+      cleanText(params.conversation?.wa_phone) ||
+      "",
+
+    ultimo_mensaje: inboundText || cleanText(currentDatos.ultimo_mensaje) || null,
+    origen_livenos: true,
+    conversation_id: params.conversation?.id || params.opportunity?.conversacion_id || null
+  };
+
+  if (!inboundText || isGreetingOnly(inboundText)) {
+    const score = calculateOpportunityScore({
+      campos: params.campos,
+      datos: baseDatos
+    });
+
+    return {
+      detected_data: {},
+      datos: baseDatos,
+      score,
+      ai_used: false,
+      ai_error: null
+    };
+  }
+
+  const apiKey = Deno.env.get("OPENAI_API_KEY");
+
+  let detectedData: Record<string, unknown> = {};
+  let aiError: string | null = null;
+
+  if (apiKey) {
+    try {
+      const camposPrompt = (params.campos || [])
+        .map((campo: any) => {
+          return `- ${campo.clave}: ${campo.etiqueta}. Pregunta sugerida: ${campo.pregunta_sugerida || "—"}`;
+        })
+        .join("\n");
+
+      const response = await fetch("https://api.openai.com/v1/responses", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model:
+            cleanText(params.config?.modelo) ||
+            Deno.env.get("CANDE_OPENAI_MODEL") ||
+            "gpt-4o-mini",
+          input: [
+            {
+              role: "system",
+              content: `
+Extraé datos comerciales de turismo desde un mensaje de WhatsApp.
+
+Respondé SOLO JSON válido. No expliques nada.
+
+Claves permitidas:
+{
+  "nombre": string | null,
+  "destino": string | null,
+  "origen": string | null,
+  "fechas_tentativas": string | null,
+  "cantidad_pasajeros": string | null,
+  "presupuesto_aproximado": string | null,
+  "tipo_viaje": string | null
+}
+
+Campos configurados:
+${camposPrompt}
+
+Reglas:
+- Si el mensaje es un destino, guardalo en "destino".
+- Si dice "Buzios", "Búzios", "Natal", "Rio", "Europa", "Caribe", etc., eso es destino.
+- Si dice "desde Córdoba", "salimos de Córdoba", "partimos de Buenos Aires", guardalo en "origen".
+- Si dice un mes, fecha o rango, guardalo en "fechas_tentativas".
+- Si dice "somos 2", "viajamos 4", "2 adultos", "somos dos", guardalo en "cantidad_pasajeros".
+- Si dice plata, USD, pesos o presupuesto, guardalo en "presupuesto_aproximado".
 - No inventes datos.
-- No digas "no hay nada" si el contexto muestra conversaciones abiertas u oportunidades.
-- Si hay conversaciones abiertas, mencioná cantidad, estado, si tienen vendedor asignado y próxima acción.
-- Si hay conversaciones sin asignar, marcá prioridad y recomendá tomar/derivar.
-- Si el usuario pregunta "qué tenemos", "qué hay abierto" o "oportunidades abiertas", revisá primero CONTEXTO COMERCIAL GENERAL.
-- Si falta información, decí exactamente qué falta.
-- Si sugerís una respuesta al pasajero, escribila lista para copiar y pegar.
-- No digas que sos ChatGPT.
+- Si no hay dato claro, devolvé null.
+`.trim()
+            },
+            {
+              role: "user",
+              content: `
+Datos actuales:
+${formatJson(baseDatos)}
+
+Mensaje nuevo del pasajero:
+${inboundText}
+`.trim()
+            }
+          ]
+        })
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || data.error) {
+        aiError = data?.error?.message || `OpenAI rechazó extracción. HTTP ${response.status}`;
+      } else {
+        const outputText =
+          data.output_text ||
+          data.output?.[0]?.content?.[0]?.text ||
+          data.output?.[0]?.content?.[0]?.content ||
+          "";
+
+        detectedData = normalizeDetectedLeadData(parseJsonObjectFromText(outputText));
+      }
+    } catch (error) {
+      aiError = getErrorMessage(error);
+    }
+  }
+
+  if (
+    !cleanText(baseDatos.destino) &&
+    !cleanText(detectedData.destino) &&
+    inboundText.length >= 3 &&
+    inboundText.length <= 80 &&
+    !inboundText.includes("?") &&
+    !isGreetingOnly(inboundText)
+  ) {
+    const normalized = normalizeForIntent(inboundText);
+
+    const looksLikeOnlyOrigin =
+      normalized.includes("desde ") ||
+      normalized.includes("salimos de ") ||
+      normalized.includes("partimos de ");
+
+    if (!looksLikeOnlyOrigin) {
+      detectedData.destino = inboundText;
+    }
+  }
+
+  const mergedDatos = {
+    ...baseDatos,
+    ...Object.fromEntries(
+      Object.entries(detectedData).filter(([, value]) => cleanText(value))
+    ),
+    ultimo_mensaje: inboundText || baseDatos.ultimo_mensaje
+  };
+
+  const score = calculateOpportunityScore({
+    campos: params.campos,
+    datos: mergedDatos
+  });
+
+  return {
+    detected_data: detectedData,
+    datos: mergedDatos,
+    score,
+    ai_used: Boolean(apiKey),
+    ai_error: aiError
+  };
+}
+
+/* =========================================================
+   PROMPTS
+========================================================= */
+
+function buildSystemPrompt(params: {
+  config: any;
+  campos: any[];
+  faqs: any[];
+  palabrasClave: any[];
+  deriveInfo: any;
+}) {
+  const config = params.config || {};
+
+  const nombreIa = getNombreIa(config);
+  const marcaVisible = getMarcaVisible(config);
+
+  const promptBase =
+    cleanText(config.prompt_base) ||
+    `Sos ${nombreIa}, asistente virtual de ${marcaVisible}. Atendés consultas iniciales por WhatsApp.`;
+
+  const tono =
+    cleanText(config.tono) ||
+    "cálido, claro, profesional, breve y natural para WhatsApp";
+
+  const reglasDuras =
+    cleanText(config.reglas_duras) ||
+    "No des precios concretos. No prometas disponibilidad. No inventes vuelos, hoteles, tarifas ni condiciones. No confirmes reservas. No solicites datos sensibles de pago.";
+
+  const datosARelevar = config.datos_a_relevar || [];
+  const cosasProhibidas = config.cosas_prohibidas || [];
+
+  const mensajeInicial = getMensajeInicial(config);
+  const mensajeFaltaInfo = getMensajeFaltaInfo(config);
+  const mensajeNoEntiende = getMensajeNoEntiende(config);
+  const mensajeFueraHorario = getMensajeFueraHorario(config);
+  const mensajeDerivacion = getMensajeDerivacion(config);
+
+  return `
+${promptBase}
+
+IDENTIDAD CONFIGURADA:
+- Nombre de la IA: ${nombreIa}
+- Marca visible: ${marcaVisible}
+- Canal: WhatsApp
+- Rol: asistente de pasajeros / primer filtro comercial.
+- No menciones NIA, Supabase, pipeline, score, oportunidad, cande_config ni herramientas internas.
+- Respondé SIEMPRE en español de Argentina.
+- Nunca respondas en inglés.
+
+TONO CONFIGURADO:
+${tono}
+
+MENSAJES CONFIGURADOS:
+- Mensaje inicial sugerido: ${mensajeInicial}
+- Si falta información: ${mensajeFaltaInfo}
+- Si no entendés: ${mensajeNoEntiende}
+- Fuera de horario: ${mensajeFueraHorario}
+- Derivación a asesor: ${mensajeDerivacion}
+
+DATOS A RELEVAR DESDE CONFIGURACIÓN:
+${formatList(datosARelevar)}
+
+CAMPOS CONFIGURADOS EN EL PANEL:
+${formatRowsForPrompt(params.campos)}
+
+FAQS / CONOCIMIENTO CONFIGURADO:
+${formatRowsForPrompt(params.faqs)}
+
+PALABRAS CLAVE / CRITERIOS CONFIGURADOS:
+${formatRowsForPrompt(params.palabrasClave)}
+
+REGLAS DURAS CONFIGURADAS:
+${reglasDuras}
+
+COSAS PROHIBIDAS CONFIGURADAS:
+${formatList(cosasProhibidas)}
+
+REGLAS OPERATIVAS:
+- Respondé breve, natural y útil para WhatsApp.
+- No escribas mensajes largos.
+- Pedí datos faltantes de a poco.
+- No hagas interrogatorios largos.
+- Si el pasajero solo saluda, presentate con el mensaje inicial configurado o una variante natural.
+- Si ya tenés destino pero falta fecha, preguntá fecha o mes aproximado.
+- Si ya tenés fecha pero falta cantidad de pasajeros, preguntá cantidad de pasajeros.
+- Si ya tenés destino, fecha y cantidad de pasajeros, preguntá origen o ciudad de salida.
+- Si hay menores, pedí edades.
+- Si pide precio, explicá que necesitás datos básicos para que un asesor pueda cotizar correctamente.
+- No inventes precios, hoteles, vuelos, tarifas, cupos, promociones ni disponibilidad.
+- No confirmes reservas.
+- No pidas tarjetas, claves, DNI completo ni datos sensibles de pago.
+- Si corresponde derivar, usá el mensaje de derivación configurado y no sigas indagando.
+
+DERIVACIÓN:
+${
+  params.deriveInfo?.shouldDerive
+    ? `- En este mensaje corresponde derivar al equipo. Motivo interno: ${params.deriveInfo.reason}. Respondé usando una versión natural del mensaje de derivación configurado.`
+    : "- No derives salvo que el pasajero lo pida, haya urgencia clara o el contexto lo indique."
+}
+
+FORMATO:
+- Devolvé solamente el texto final que se enviará al pasajero.
+- No uses markdown.
+- No expliques tu razonamiento.
+- No digas “I'm sorry, I can't assist with that”.
+- Si no podés responder algo, pedí los datos faltantes en español.
 `.trim();
 }
 
 function buildUserPrompt(params: {
-  userMessage: string;
-  context: any;
-  conversation: any | null;
+  config: any;
+  conversation: any;
+  opportunity: any;
   messages: any[];
-  generalContext: any | null;
+  inboundMessage: any | null;
 }) {
-  const context = params.context || {};
-  const lastMessages = params.messages.map(formatMessageForPrompt).join("\n") || "Sin mensajes cargados.";
-  const negativeFeedback =
-    params.generalContext?.training_memory?.negative_feedback ||
-    params.generalContext?.recent_negative_feedback ||
-    [];
-  const positiveFeedback =
-    params.generalContext?.training_memory?.positive_feedback ||
-    params.generalContext?.recent_positive_feedback ||
-    [];
+  const conversation = params.conversation;
+  const opportunity = params.opportunity;
+  const datos = opportunity?.datos || {};
+  const lastMessages = params.messages.map(formatMessageForPrompt).join("\n") || "Sin mensajes previos.";
+
+  const passengerName =
+    cleanText(datos.nombre) ||
+    cleanText(datos.contacto_nombre) ||
+    cleanText(datos.pasajero) ||
+    cleanText(conversation?.titulo) ||
+    "Sin nombre";
+
+  const passengerPhone =
+    cleanText(datos.wa_phone) ||
+    cleanText(datos.telefono) ||
+    cleanText(conversation?.wa_phone) ||
+    "—";
 
   return `
-PEDIDO DEL USUARIO INTERNO:
-${params.userMessage}
+PASAJERO:
+Nombre/título: ${passengerName}
+WhatsApp: ${passengerPhone}
 
-CONTEXTO ENVIADO DESDE LA PANTALLA:
-${formatJson(context)}
+DATOS DETECTADOS DE LA OPORTUNIDAD:
+${formatJson(datos)}
 
-CONTEXTO COMERCIAL GENERAL:
-${formatJson(params.generalContext)}
+MENSAJE QUE DISPARÓ CANDE:
+${params.inboundMessage ? formatMessageForPrompt(params.inboundMessage) : "No vino inbound_message_id. Usar último mensaje inbound de la conversación."}
 
-FEEDBACK NEGATIVO RECIENTE PARA ENTRENAMIENTO OPERATIVO:
-${formatJson(negativeFeedback)}
-
-FEEDBACK POSITIVO RECIENTE COMO EJEMPLO DE BUEN CRITERIO:
-${formatJson(positiveFeedback)}
-
-REGISTRO DE CONVERSACIÓN PUNTUAL EN BASE:
-${formatJson(params.conversation)}
-
-ÚLTIMOS MENSAJES DE LA CONVERSACIÓN PUNTUAL:
+ÚLTIMOS MENSAJES:
 ${lastMessages}
 
-INSTRUCCIONES DE USO DEL CONTEXTO:
-- Si hay conversación puntual, priorizá esa conversación.
-- Si no hay conversación puntual, usá el contexto comercial general.
-- Aplicá especialmente las correcciones del feedback negativo reciente.
-- No repitas errores que el equipo ya corrigió en el feedback.
-- Si el usuario dio una orden directa, no pidas confirmación; respondé como acción realizada solo si la herramienta/código la ejecutó.
+INSTRUCCIÓN:
+Respondé solo el próximo mensaje que ${getNombreIa(params.config)} debe enviar al pasajero por WhatsApp.
+La respuesta debe estar en español de Argentina.
 `.trim();
 }
 
+/* =========================================================
+   OPENAI + RESPUESTA SEGURA
+========================================================= */
+
 async function callOpenAI(params: {
+  config: any;
   systemPrompt: string;
   userPrompt: string;
 }) {
@@ -524,65 +1141,15 @@ async function callOpenAI(params: {
   if (!apiKey) {
     return {
       ok: false,
-      missingKey: true,
-      text: ""
+      text: "",
+      error: "Falta OPENAI_API_KEY."
     };
   }
 
-  async function transcribeAudioWithOpenAI(params: {
-  audioBase64: string;
-  mimeType: string;
-  filename?: string | null;
-}) {
-  const apiKey = Deno.env.get("OPENAI_API_KEY");
-
-  if (!apiKey) {
-    throw new Error("No hay OPENAI_API_KEY configurada para transcribir audio.");
-  }
-
-  const cleanBase64 = cleanText(params.audioBase64).replace(/^data:audio\/[a-zA-Z0-9.+-]+;base64,/, "");
-
-  if (!cleanBase64) {
-    throw new Error("El audio llegó vacío.");
-  }
-
-  const binary = Uint8Array.from(atob(cleanBase64), (char) => char.charCodeAt(0));
-  const mimeType = cleanText(params.mimeType) || "audio/webm";
-  const filename = cleanText(params.filename) || "nia-audio.webm";
-
-  const blob = new Blob([binary], {
-    type: mimeType
-  });
-
-  const formData = new FormData();
-  formData.append("file", blob, filename);
-  formData.append("model", Deno.env.get("NIA_TRANSCRIPTION_MODEL") || "gpt-4o-mini-transcribe");
-  formData.append("language", "es");
-
-  const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`
-    },
-    body: formData
-  });
-
-  const data = await response.json();
-
-  if (!response.ok || data.error) {
-    throw new Error(data?.error?.message || `OpenAI rechazó la transcripción. HTTP ${response.status}`);
-  }
-
-  const text = cleanText(data.text);
-
-  if (!text) {
-    throw new Error("No pude transcribir el audio.");
-  }
-
-  return text;
-}
-
-  const model = Deno.env.get("NIA_OPENAI_MODEL") || "gpt-4.1-mini";
+  const model =
+    cleanText(params.config?.modelo) ||
+    Deno.env.get("CANDE_OPENAI_MODEL") ||
+    "gpt-4o-mini";
 
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
@@ -610,8 +1177,8 @@ async function callOpenAI(params: {
   if (!response.ok || data.error) {
     return {
       ok: false,
-      missingKey: false,
-      text:
+      text: "",
+      error:
         data?.error?.message ||
         `OpenAI rechazó la solicitud. HTTP ${response.status}`
     };
@@ -623,1193 +1190,634 @@ async function callOpenAI(params: {
     data.output?.[0]?.content?.[0]?.content ||
     "";
 
+  const clean = normalizeWhatsappText(text);
+
+  if (!clean) {
+    return {
+      ok: false,
+      text: "",
+      error: "OpenAI no devolvió texto."
+    };
+  }
+
   return {
     ok: true,
-    missingKey: false,
-    text: cleanText(text) || "NIA no pudo generar una respuesta."
+    text: clean,
+    error: null
   };
 }
 
-function fallbackResponse(params: {
-  userMessage: string;
-  context: any;
-  messages: any[];
-  generalContext: any | null;
-  conversationId: string | null;
-}) {
-  if (!params.conversationId && params.generalContext) {
-    const openCount = Number(params.generalContext.open_conversations_count || 0);
-    const unattendedCount = Number(params.generalContext.unattended_conversations_count || 0);
-    const opportunitiesCount = Number(params.generalContext.opportunities_count || 0);
-    const firstOpen = params.generalContext.open_conversations?.[0] || null;
+function isBadCandeResponse(text: string): boolean {
+  const normalized = normalizeForIntent(text);
 
-    return `
-Contexto comercial general:
+  if (!normalized) return true;
 
-- Conversaciones abiertas: ${openCount}
-- Conversaciones sin vendedor asignado: ${unattendedCount}
-- Oportunidades detectadas: ${opportunitiesCount}
+  const badPhrases = [
+    "i'm sorry, i can't assist with that",
+    "im sorry, i cant assist with that",
+    "i cannot assist with that",
+    "i can't assist with that",
+    "sorry, i can't",
+    "can't assist",
+    "cannot assist",
+    "lo siento, no puedo ayudar",
+    "no puedo ayudarte con eso",
+    "no puedo asistir"
+  ];
 
-${
-  firstOpen
-    ? `Conversación abierta más reciente:
-- Pasajero/título: ${cleanText(firstOpen.titulo || firstOpen.subject || firstOpen.wa_phone) || "—"}
-- Estado gestión: ${cleanText(firstOpen.estado_gestion) || "—"}
-- Inbox: ${cleanText(firstOpen.inbox) || "—"}
-- Último mensaje: ${cleanText(firstOpen.last_message_preview) || "—"}`
-    : "No hay conversaciones abiertas en el contexto cargado."
+  return badPhrases.some((phrase) => normalized.includes(normalizeForIntent(phrase)));
 }
 
-Tu pedido fue:
-"${params.userMessage}"
+function fallbackCandeResponse(params: {
+  config: any;
+  conversation: any;
+  opportunity: any;
+  deriveInfo?: any;
+}) {
+  const config = params.config || {};
+  const datos = params.opportunity?.datos || {};
 
-OpenAI no está configurado, pero NIA ya está leyendo el contexto general y el feedback del panel de entrenamiento.
-`.trim();
+  if (params.deriveInfo?.shouldDerive) {
+    return getMensajeDerivacion(config);
   }
 
-  const passenger =
-    cleanText(params.context?.contacto_nombre) ||
-    cleanText(params.context?.contacto) ||
-    cleanText(params.context?.wa_phone) ||
-    "esta conversación";
+  const nombre =
+    cleanText(datos.nombre) ||
+    cleanText(datos.contacto_nombre) ||
+    cleanText(datos.pasajero) ||
+    cleanText(params.conversation?.titulo);
 
-  const score = params.context?.oportunidad_score ?? "—";
-  const cande = params.context?.cande_activa ? "activa" : "pausada";
-  const lastMessage =
-    cleanText(params.context?.last_message_preview) ||
-    cleanText(params.messages[params.messages.length - 1]?.text) ||
-    "—";
+  const firstName =
+    nombre && nombre.toLowerCase() !== "sin nombre"
+      ? nombre.split(" ")[0]
+      : "";
 
-  return `
-Tengo el contexto de ${passenger}.
+  const destino = cleanText(datos.destino);
+  const fechas = cleanText(datos.fechas_tentativas);
+  const pax = cleanText(datos.cantidad_pasajeros);
+  const origen = cleanText(datos.origen);
 
-Resumen operativo:
-- Score: ${score}
-- CANDE: ${cande}
-- Último mensaje: ${lastMessage}
-
-Tu pedido fue:
-"${params.userMessage}"
-
-OpenAI no está configurado, pero la conexión con LiveNos, Supabase y el panel de feedback ya está funcionando.
-`.trim();
-}
-
-async function insertNiaAudit(params: {
-  supabase: any;
-  userId: string | null;
-  payload: any;
-  userMessage: string;
-  assistantResponse: string | null;
-  conversationId: string | null;
-  tool: string | null;
-  usedOpenai: boolean;
-  success: boolean;
-  error?: string | null;
-  generalContext?: any | null;
-  actionResult?: any | null;
-  actionExecuted?: boolean;
-}) {
-  const context = params.payload?.context || {};
-  const oportunidadId = cleanText(context?.oportunidad_id);
-  const safeOportunidadId = oportunidadId || null;
-
-  const insertRes = await params.supabase
-    .from("nia_interacciones")
-    .insert({
-      user_id: params.userId,
-
-      source: cleanText(context?.source || params.payload?.source) || null,
-      module: cleanText(context?.module) || null,
-      action: cleanText(context?.action) || null,
-
-      conversation_id: params.conversationId || null,
-      oportunidad_id: safeOportunidadId,
-
-      user_message: params.userMessage,
-      assistant_response: params.assistantResponse,
-
-      context,
-      metadata: {
-        payload_source: params.payload?.source || null,
-        used_context_conversation_id:
-          params.payload?.context?.conversation_id ||
-          params.payload?.context?.conversacion_id ||
-          null,
-        general_context_summary: params.generalContext
-          ? {
-              open_conversations_count: params.generalContext.open_conversations_count,
-              unattended_conversations_count: params.generalContext.unattended_conversations_count,
-              opportunities_count: params.generalContext.opportunities_count
-            }
-          : null,
-        action_executed: params.actionExecuted || false,
-        action_result: params.actionResult || null,
-        created_by: "nia-chat"
-      },
-
-      tool: params.tool,
-      used_openai: params.usedOpenai,
-      success: params.success,
-      error: params.error || null
-    })
-    .select("id")
-    .single();
-
-  if (insertRes.error) {
-    console.error("[nia-chat] No se pudo guardar auditoría:", insertRes.error.message);
-    return null;
+  if (destino && !fechas) {
+    return `¡Genial${firstName ? `, ${firstName}` : ""}! ${destino} es una muy buena opción. ¿Tenés alguna fecha o mes aproximado para viajar?`;
   }
 
-  return insertRes.data?.id || null;
+  if (destino && fechas && !pax) {
+    return `Perfecto${firstName ? `, ${firstName}` : ""}. ¿Cuántas personas viajarían?`;
+  }
+
+  if (destino && fechas && pax && !origen) {
+    return `Buenísimo${firstName ? `, ${firstName}` : ""}. ¿Desde qué ciudad estarían saliendo?`;
+  }
+
+  if (destino && fechas && pax && origen) {
+    return getMensajeDerivacion(config);
+  }
+
+  const base = getMensajeInicial(config);
+
+  if (firstName && !base.toLowerCase().includes(firstName.toLowerCase())) {
+    return `Hola ${firstName}, soy ${getNombreIa(config)} de ${getMarcaVisible(config)} 😊 ¿En qué puedo ayudarte con tu viaje?`;
+  }
+
+  return base;
 }
 
-type NiaAction =
-  | { type: "mark_urgent" }
-  | { type: "pause_cande" }
-  | { type: "activate_cande" }
-  | { type: "take_conversation" }
-  | { type: "create_internal_note"; text: string }
-  | { type: "create_reminder"; text: string }
-  | { type: "change_pipeline_status"; statusName: string; targetName?: string | null };
+function safeCandeText(params: {
+  aiText: string;
+  aiOk: boolean;
+  config: any;
+  conversation: any;
+  opportunity: any;
+  deriveInfo?: any;
+}) {
+  const clean = normalizeWhatsappText(params.aiText);
 
-function extractTextAfterSeparators(message: string): string {
-  const clean = cleanText(message);
-  const separators = [":", "-", "—"];
-
-  for (const separator of separators) {
-    const index = clean.indexOf(separator);
-
-    if (index >= 0 && index < clean.length - 1) {
-      return clean.slice(index + 1).trim();
-    }
+  if (!params.aiOk || isBadCandeResponse(clean)) {
+    return fallbackCandeResponse({
+      config: params.config,
+      conversation: params.conversation,
+      opportunity: params.opportunity,
+      deriveInfo: params.deriveInfo
+    });
   }
 
   return clean;
 }
 
-function extractPipelineTargetAndStatus(userMessage: string): { targetName: string | null; statusName: string | null } {
-  const original = cleanText(userMessage);
-  const normalized = normalizeForIntent(original);
+/* =========================================================
+   DB UPDATES / SEND
+========================================================= */
 
-  const estadosConocidos = [
-    "sin atender",
-    "nuevo",
-    "nueva",
-    "en gestion",
-    "en gestión",
-    "presupuestada",
-    "presupuestado",
-    "cotizada",
-    "cotizado",
-    "vendida",
-    "vendido",
-    "ganada",
-    "ganado",
-    "perdida",
-    "perdido",
-    "cerrada",
-    "cerrado"
-  ];
-
-  for (const estado of estadosConocidos) {
-    const estadoNorm = normalizeForIntent(estado);
-
-    if (!normalized.includes(estadoNorm)) continue;
-
-    let target = ` ${normalized} `;
-
-    const frasesAEliminar = [
-      "pasa a",
-      "pasar a",
-      "pasala a",
-      "pasalo a",
-      "mover a",
-      "movela a",
-      "movelo a",
-      "cambiar a",
-      "cambia a",
-      "cambiala a",
-      "cambialo a",
-      "cambiar estado a",
-      "cambia estado a",
-      "cambiar el estado a",
-      "cambia el estado a",
-      "pasa",
-      "pasar",
-      "pasala",
-      "pasalo",
-      "mover",
-      "movela",
-      "movelo",
-      "cambiar",
-      "cambia",
-      "cambiala",
-      "cambialo",
-      "estado",
-      "el contacto",
-      "contacto",
-      "la oportunidad de",
-      "la oportunidad",
-      "oportunidad",
-      "la conversacion de",
-      "la conversación de",
-      "la conversacion",
-      "la conversación",
-      "conversacion",
-      "conversación",
-      "la de",
-      "el de"
-    ];
-
-    frasesAEliminar.forEach((frase) => {
-      const fraseNorm = normalizeForIntent(frase);
-      target = target.replaceAll(` ${fraseNorm} `, " ");
-    });
-
-    target = target.replaceAll(` ${estadoNorm} `, " ");
-
-    // Limpieza final segura: elimina conectores sueltos, pero NO borra letras dentro de nombres.
-    const tokens = target
-      .replace(/\s+/g, " ")
-      .trim()
-      .split(" ")
-      .filter(Boolean)
-      .filter((token) => !["a", "al", "el", "la", "de"].includes(token));
-
-    target = tokens.join(" ").trim();
-
-    return {
-      targetName: target || null,
-      statusName: estado
-    };
-  }
-
-  return {
-    targetName: null,
-    statusName: null
-  };
-}
-
-function detectNiaAction(userMessage: string): NiaAction | null {
-  const normalized = normalizeForIntent(userMessage);
-
-  function hasPhrase(phrases: string[]) {
-    return phrases.some((phrase) => normalized.includes(normalizeForIntent(phrase)));
-  }
-
-  if (
-    hasPhrase([
-      "pausar cande",
-      "pausa cande",
-      "desactivar cande",
-      "desactiva cande",
-      "apagar cande",
-      "apaga cande",
-      "quitar cande",
-      "quita cande",
-      "frenar cande",
-      "frena cande",
-      "suspender cande",
-      "suspende cande"
-    ])
-  ) {
-    return { type: "pause_cande" };
-  }
-
-  if (
-    hasPhrase([
-      "activar cande",
-      "activa cande",
-      "encender cande",
-      "encende cande",
-      "prender cande",
-      "prende cande",
-      "habilitar cande",
-      "habilita cande"
-    ])
-  ) {
-    return { type: "activate_cande" };
-  }
-
-  if (
-    hasPhrase([
-      "marcar urgente",
-      "marcala urgente",
-      "marcalo urgente",
-      "poner urgente",
-      "ponela urgente",
-      "ponelo urgente",
-      "urgente esta conversacion",
-      "urgente esta conversación"
-    ])
-  ) {
-    return { type: "mark_urgent" };
-  }
-
-  if (
-    hasPhrase([
-      "tomar conversacion",
-      "tomar conversación",
-      "tomar esta conversacion",
-      "tomar esta conversación",
-      "toma esta conversacion",
-      "toma esta conversación",
-      "asignarmela",
-      "asignármela",
-      "asignamela",
-      "asignámela",
-      "me la asignas",
-      "me la asignás"
-    ])
-  ) {
-    return { type: "take_conversation" };
-  }
-
-  if (
-    hasPhrase([
-      "crear nota interna",
-      "generar nota interna",
-      "agregar nota interna",
-      "guardar nota interna",
-      "dejar nota interna"
-    ])
-  ) {
-    return {
-      type: "create_internal_note",
-      text: extractTextAfterSeparators(userMessage)
-    };
-  }
-
-  if (
-    hasPhrase([
-      "crear recordatorio",
-      "generar recordatorio",
-      "agregar recordatorio",
-      "guardar recordatorio",
-      "dejar recordatorio",
-      "recordame",
-      "recordar"
-    ])
-  ) {
-    return {
-      type: "create_reminder",
-      text: extractTextAfterSeparators(userMessage)
-    };
-  }
-
-  const pipelineActionWords = [
-    "pasa",
-    "pasar",
-    "pasala",
-    "pasalo",
-    "mover",
-    "movela",
-    "movelo",
-    "cambiar",
-    "cambia",
-    "cambiala",
-    "cambialo"
-  ];
-
-  const pipelineStateWords = [
-    "sin atender",
-    "nuevo",
-    "nueva",
-    "en gestion",
-    "en gestión",
-    "presupuestada",
-    "presupuestado",
-    "cotizada",
-    "cotizado",
-    "vendida",
-    "vendido",
-    "ganada",
-    "ganado",
-    "perdida",
-    "perdido",
-    "cerrada",
-    "cerrado"
-  ];
-
-  const hasPipelineAction = pipelineActionWords.some((word) =>
-    normalized.includes(normalizeForIntent(word))
-  );
-
-  const hasPipelineState = pipelineStateWords.some((word) =>
-    normalized.includes(normalizeForIntent(word))
-  );
-
-  if (hasPipelineAction && hasPipelineState) {
-    const targetStatus = extractPipelineTargetAndStatus(userMessage);
-
-    if (targetStatus.statusName) {
-      return {
-        type: "change_pipeline_status",
-        statusName: targetStatus.statusName,
-        targetName: targetStatus.targetName
-      };
-    }
-  }
-
-  return null;
-}
-
-async function getOpportunityForConversation(params: {
+async function insertOutboundMessage(params: {
   supabase: any;
-  conversationId: string;
+  conversation: any;
+  opportunity: any;
+  config: any;
+  text: string;
 }) {
+  const now = new Date().toISOString();
+  const nombreIa = getNombreIa(params.config);
+
   const { data, error } = await params.supabase
-    .from("lead_oportunidades")
+    .from("mensajes")
+    .insert({
+      conversacion_id: params.conversation.id,
+      direction: "out",
+      sender_kind: "cande",
+      type: "text",
+      text: params.text,
+      status: "pending",
+      wa_timestamp: now
+    })
     .select("*")
-    .eq("conversacion_id", params.conversationId)
-    .maybeSingle();
+    .single();
 
   if (error) throw error;
 
-  return data || null;
+  await params.supabase
+    .from("conversaciones")
+    .update({
+      last_message_preview: `${nombreIa}:\n${params.text}`,
+      last_message_at: now,
+      last_outbound_message_at: now,
+      updated_at: now
+    })
+    .eq("id", params.conversation.id);
+
+  return data;
 }
 
-async function findOpportunityByTargetName(params: {
+async function markOutboundFailed(params: {
   supabase: any;
-  targetName: string | null | undefined;
+  messageId: string;
+  error: string;
 }) {
-  const target = normalizeForIntent(params.targetName || "");
-
-  if (!target) return null;
-
-  const [oportunidadesRes, conversacionesRes, contactosRes] = await Promise.all([
-    params.supabase
-      .from("lead_oportunidades")
-      .select("id,conversacion_id,estado_id,score,datos,assigned_to,cande_activa,updated_at,created_at")
-      .order("updated_at", { ascending: false })
-      .limit(200),
-
-    params.supabase
-      .from("conversaciones")
-      .select("id,contacto_id,wa_phone,titulo,subject,assigned_to,estado_gestion,estado_comercial,last_message_preview")
-      .is("deleted_at", null)
-      .limit(500),
-
-    params.supabase
-      .from("contactos_wa")
-      .select("id,wa_phone,display_name,profile_name")
-      .limit(500)
-  ]);
-
-  if (oportunidadesRes.error) throw oportunidadesRes.error;
-  if (conversacionesRes.error) throw conversacionesRes.error;
-  if (contactosRes.error) throw contactosRes.error;
-
-  const conversacionesMap = new Map<string, any>();
-  (conversacionesRes.data || []).forEach((conv: any) => {
-    conversacionesMap.set(conv.id, conv);
-  });
-
-  const contactosMap = new Map<string, any>();
-  (contactosRes.data || []).forEach((contacto: any) => {
-    contactosMap.set(contacto.id, contacto);
-  });
-
-  const enriched = (oportunidadesRes.data || []).map((opp: any) => {
-    const conv = conversacionesMap.get(opp.conversacion_id) || null;
-    const contacto = conv?.contacto_id ? contactosMap.get(conv.contacto_id) || null : null;
-
-    return {
-      ...opp,
-      conversacion: conv,
-      contacto
-    };
-  });
-
-  const matches = enriched.filter((item: any) => {
-    const conv = item.conversacion || {};
-    const contacto = item.contacto || {};
-    const datos = item.datos || {};
-
-    const haystack = [
-      datos.nombre,
-      datos.contacto_nombre,
-      datos.pasajero,
-      datos.nombre_pasajero,
-      datos.cliente,
-      datos.contacto,
-      datos.telefono,
-      datos.wa_phone,
-      datos.whatsapp,
-      conv.titulo,
-      conv.subject,
-      conv.wa_phone,
-      contacto.display_name,
-      contacto.profile_name,
-      contacto.wa_phone
-    ]
-      .filter(Boolean)
-      .map((value) => normalizeForIntent(String(value)))
-      .join(" ");
-
-    return haystack.includes(target) || target.includes(haystack);
-  });
-
-  if (matches.length === 1) {
-    return matches[0];
-  }
-
-  if (matches.length > 1) {
-    return {
-      multiple: true,
-      matches
-    };
-  }
-
-  return null;
+  await params.supabase
+    .from("mensajes")
+    .update({
+      status: "failed",
+      error: params.error
+    })
+    .eq("id", params.messageId);
 }
 
-function getDisplayNameFromOpportunity(item: any) {
-  const datos = item?.datos || {};
-  const conv = item?.conversacion || {};
-  const contacto = item?.contacto || {};
-
-  return (
-    cleanText(datos.nombre) ||
-    cleanText(datos.contacto_nombre) ||
-    cleanText(datos.pasajero) ||
-    cleanText(datos.nombre_pasajero) ||
-    cleanText(contacto.display_name) ||
-    cleanText(contacto.profile_name) ||
-    cleanText(conv.titulo) ||
-    cleanText(conv.subject) ||
-    cleanText(conv.wa_phone) ||
-    "Sin nombre"
-  );
-}
-
-function getPhoneFromOpportunity(item: any) {
-  const datos = item?.datos || {};
-  const conv = item?.conversacion || {};
-  const contacto = item?.contacto || {};
-
-  return (
-    cleanText(datos.telefono) ||
-    cleanText(datos.wa_phone) ||
-    cleanText(datos.whatsapp) ||
-    cleanText(contacto.wa_phone) ||
-    cleanText(conv.wa_phone) ||
-    ""
-  );
-}
-
-function enrichOpportunityDatos(params: {
-  oportunidad: any;
+async function updateOpportunityAfterReply(params: {
+  supabase: any;
+  opportunity: any;
   conversation: any;
-  contacto: any;
+  leadAnalysis: any;
+  deriveInfo?: any;
 }) {
+  if (!params.opportunity?.id) {
+    throw new Error("No se pudo actualizar oportunidad: falta opportunity.id.");
+  }
+
   const datosActuales =
-    params.oportunidad?.datos && typeof params.oportunidad.datos === "object"
-      ? params.oportunidad.datos
+    params.opportunity?.datos && typeof params.opportunity.datos === "object"
+      ? params.opportunity.datos
       : {};
 
-  const nombreContacto =
-    cleanText(params.contacto?.display_name) ||
-    cleanText(params.contacto?.profile_name) ||
-    cleanText(params.conversation?.titulo) ||
-    cleanText(params.conversation?.subject) ||
-    cleanText(params.conversation?.wa_phone) ||
-    "Sin nombre";
+  const datosAnalizados =
+    params.leadAnalysis?.datos && typeof params.leadAnalysis.datos === "object"
+      ? params.leadAnalysis.datos
+      : {};
 
-  const telefonoContacto =
-    cleanText(params.contacto?.wa_phone) ||
-    cleanText(params.conversation?.wa_phone) ||
-    "";
-
-  return {
+  const enrichedDatos = {
     ...datosActuales,
-    nombre: cleanText((datosActuales as any).nombre) || nombreContacto,
-    contacto_nombre: cleanText((datosActuales as any).contacto_nombre) || nombreContacto,
-    pasajero: cleanText((datosActuales as any).pasajero) || nombreContacto,
-    telefono: cleanText((datosActuales as any).telefono) || telefonoContacto,
-    wa_phone: cleanText((datosActuales as any).wa_phone) || telefonoContacto,
-    ultimo_mensaje:
-      cleanText((datosActuales as any).ultimo_mensaje) ||
-      cleanText(params.conversation?.last_message_preview) ||
-      null,
+    ...datosAnalizados,
+    nombre:
+      cleanText(datosAnalizados.nombre) ||
+      cleanText(datosActuales.nombre) ||
+      cleanText(datosActuales.contacto_nombre) ||
+      cleanText(params.conversation?.titulo) ||
+      "Sin nombre",
+    contacto_nombre:
+      cleanText(datosAnalizados.contacto_nombre) ||
+      cleanText(datosActuales.contacto_nombre) ||
+      cleanText(datosActuales.nombre) ||
+      cleanText(params.conversation?.titulo) ||
+      "Sin nombre",
+    pasajero:
+      cleanText(datosAnalizados.pasajero) ||
+      cleanText(datosActuales.pasajero) ||
+      cleanText(datosActuales.nombre) ||
+      cleanText(params.conversation?.titulo) ||
+      "Sin nombre",
+    telefono:
+      cleanText(datosAnalizados.telefono) ||
+      cleanText(datosActuales.telefono) ||
+      cleanText(datosActuales.wa_phone) ||
+      cleanText(params.conversation?.wa_phone) ||
+      "",
+    wa_phone:
+      cleanText(datosAnalizados.wa_phone) ||
+      cleanText(datosActuales.wa_phone) ||
+      cleanText(datosActuales.telefono) ||
+      cleanText(params.conversation?.wa_phone) ||
+      "",
     origen_livenos: true,
-    conversation_id: params.conversation?.id || params.oportunidad?.conversacion_id || null
+    conversation_id: params.conversation?.id || params.opportunity?.conversacion_id || null
   };
+
+  const nextScore = Number(params.leadAnalysis?.score || 0);
+
+  const updatePayload: Record<string, unknown> = {
+    datos: enrichedDatos,
+    score: nextScore,
+    last_score_at: new Date().toISOString(),
+    updated_at: new Date().toISOString()
+  };
+
+  if (params.deriveInfo?.shouldDerive && !params.opportunity.cande_handoff_requested_at) {
+    updatePayload.cande_handoff_requested_at = new Date().toISOString();
+  }
+
+  const { data, error } = await params.supabase
+    .from("lead_oportunidades")
+    .update(updatePayload)
+    .eq("id", params.opportunity.id)
+    .select("id, datos, score, updated_at, last_score_at, cande_handoff_requested_at")
+    .single();
+
+  if (error) {
+    throw new Error(`No se pudo actualizar lead_oportunidades: ${error.message}`);
+  }
+
+  return data;
 }
 
-async function executeNiaAction(params: {
-  supabase: any;
-  action: NiaAction;
-  conversationId: string | null;
-  userId: string | null;
-  payload: any;
+async function callWhatsappSendMessage(params: {
+  conversation: any;
+  outboundMessage: any;
+  text: string;
 }) {
-  const now = new Date().toISOString();
-  const initialConversationId = params.conversationId;
+  const supabaseUrl = getEnvSupabaseUrl();
+  const serviceRoleKey = getEnvServiceRoleKey();
 
-  if (!params.userId) {
-    return {
-      executed: false,
-      ok: false,
-      text: "No pude ejecutar la acción porque no pude identificar el usuario actual. Volvé a iniciar sesión e intentá nuevamente.",
-      action_result: null
-    };
+  const response = await fetch(`${supabaseUrl}/functions/v1/whatsapp-send-message`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${serviceRoleKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      source: "cande-reply",
+
+      conversation_id: params.conversation.id,
+      conversacion_id: params.conversation.id,
+
+      message_id: params.outboundMessage.id,
+      mensaje_id: params.outboundMessage.id,
+
+      to: params.conversation.wa_phone,
+      phone: params.conversation.wa_phone,
+      wa_phone: params.conversation.wa_phone,
+
+      type: "text",
+      text: params.text,
+      body: params.text,
+
+      sender_kind: "cande"
+    })
+  });
+
+  let data: any = null;
+
+  try {
+    data = await response.json();
+  } catch {
+    data = null;
   }
 
-  if (!initialConversationId && params.action.type !== "change_pipeline_status") {
-    return {
-      executed: false,
-      ok: false,
-      text: "Para ejecutar esta acción necesito estar parada en una conversación puntual de LiveNos. Abrí NIA desde la conversación que querés modificar.",
-      action_result: null
-    };
+  if (!response.ok || data?.ok === false || data?.error) {
+    throw new Error(
+      data?.error ||
+      data?.message ||
+      `whatsapp-send-message rechazó el envío. HTTP ${response.status}`
+    );
   }
 
-  if (params.action.type === "mark_urgent") {
-    const { error } = await params.supabase
-      .from("conversaciones")
-      .update({
-        priority: 3,
-        updated_at: now,
-        metadata: {
-          ...(params.payload?.context?.metadata || {}),
-          nia_last_action: "mark_urgent",
-          nia_last_action_at: now,
-          nia_last_action_by: params.userId
-        }
-      })
-      .eq("id", initialConversationId);
-
-    if (error) throw error;
-
-    return {
-      executed: true,
-      ok: true,
-      text: "Listo. Marqué esta conversación como urgente.",
-      action_result: {
-        action: "mark_urgent",
-        conversation_id: initialConversationId
-      }
-    };
-  }
-
-  if (params.action.type === "take_conversation") {
-    const { error } = await params.supabase
-      .from("conversaciones")
-      .update({
-        assigned_to: params.userId,
-        tomada_by: params.userId,
-        tomada_at: now,
-        estado_gestion: "en_gestion",
-        inbox: "vendedor",
-        updated_at: now
-      })
-      .eq("id", initialConversationId);
-
-    if (error) throw error;
-
-    return {
-      executed: true,
-      ok: true,
-      text: "Listo. Tomé la conversación y la dejé en gestión.",
-      action_result: {
-        action: "take_conversation",
-        conversation_id: initialConversationId,
-        assigned_to: params.userId
-      }
-    };
-  }
-
-  if (params.action.type === "pause_cande" || params.action.type === "activate_cande") {
-    const oportunidad = await getOpportunityForConversation({
-      supabase: params.supabase,
-      conversationId: initialConversationId
-    });
-
-    if (!oportunidad?.id) {
-      return {
-        executed: false,
-        ok: false,
-        text: "No pude actualizar CANDE porque esta conversación todavía no tiene una oportunidad vinculada.",
-        action_result: null
-      };
-    }
-
-    const nextCandeState = params.action.type === "activate_cande";
-
-    const { error } = await params.supabase
-      .from("lead_oportunidades")
-      .update({
-        cande_activa: nextCandeState,
-        updated_at: now
-      })
-      .eq("id", oportunidad.id);
-
-    if (error) throw error;
-
-    return {
-      executed: true,
-      ok: true,
-      text: nextCandeState
-        ? "Listo. Activé CANDE para esta oportunidad."
-        : "Listo. Pausé CANDE para esta oportunidad.",
-      action_result: {
-        action: params.action.type,
-        conversation_id: initialConversationId,
-        oportunidad_id: oportunidad.id,
-        cande_activa: nextCandeState
-      }
-    };
-  }
-
-  if (params.action.type === "create_internal_note" || params.action.type === "create_reminder") {
-    const rawText = cleanText(params.action.text);
-
-    const text =
-      rawText &&
-      !normalizeForIntent(rawText).includes("crear nota interna") &&
-      !normalizeForIntent(rawText).includes("generar nota interna") &&
-      !normalizeForIntent(rawText).includes("crear recordatorio") &&
-      !normalizeForIntent(rawText).includes("generar recordatorio")
-        ? rawText
-        : params.action.type === "create_reminder"
-          ? "Recordatorio generado por NIA."
-          : "Nota interna generada por NIA.";
-
-    const { error } = await params.supabase
-      .from("notas_conversacion")
-      .insert({
-        conversacion_id: initialConversationId,
-        autor_id: params.userId,
-        contenido: text,
-        tipo: params.action.type === "create_reminder" ? "recordatorio" : "mensaje_interno",
-        scheduled_for: null
-      });
-
-    if (error) throw error;
-
-    return {
-      executed: true,
-      ok: true,
-      text:
-        params.action.type === "create_reminder"
-          ? `Listo. Creé el recordatorio interno: "${text}"`
-          : `Listo. Generé la nota interna: "${text}"`,
-      action_result: {
-        action: params.action.type,
-        conversation_id: initialConversationId,
-        text
-      }
-    };
-  }
-
-  if (params.action.type === "change_pipeline_status") {
-    let resolvedConversationId = initialConversationId;
-    let oportunidad: any = null;
-
-    if (resolvedConversationId) {
-      oportunidad = await getOpportunityForConversation({
-        supabase: params.supabase,
-        conversationId: resolvedConversationId
-      });
-    }
-
-    if (!resolvedConversationId && params.action.targetName) {
-      const found = await findOpportunityByTargetName({
-        supabase: params.supabase,
-        targetName: params.action.targetName
-      });
-
-      if (!found) {
-        return {
-          executed: false,
-          ok: false,
-          text: `No encontré una oportunidad que coincida con "${params.action.targetName}". Probá con el nombre exacto que figura en la card.`,
-          action_result: {
-            action: "change_pipeline_status",
-            target_name: params.action.targetName,
-            reason: "target_not_found"
-          }
-        };
-      }
-
-      if (found.multiple) {
-        const opciones = found.matches
-          .slice(0, 5)
-          .map((item: any, index: number) => `${index + 1}. ${getDisplayNameFromOpportunity(item)}`)
-          .join("\n");
-
-        return {
-          executed: false,
-          ok: false,
-          text: `Encontré más de una oportunidad que coincide con "${params.action.targetName}". Necesito que seas más específico.\n\n${opciones}`,
-          action_result: {
-            action: "change_pipeline_status",
-            target_name: params.action.targetName,
-            reason: "multiple_matches"
-          }
-        };
-      }
-
-      oportunidad = found;
-      resolvedConversationId = found.conversacion_id || found.conversation_id || null;
-    }
-
-    if (!resolvedConversationId) {
-      return {
-        executed: false,
-        ok: false,
-        text: "No pude identificar la conversación vinculada a esa oportunidad.",
-        action_result: {
-          action: "change_pipeline_status",
-          target_name: params.action.targetName || null,
-          reason: "missing_conversation_id"
-        }
-      };
-    }
-
-    const requestedStatus = normalizeForIntent(params.action.statusName);
-
-    const { data: estados, error: estadosError } = await params.supabase
-      .from("pipeline_estados")
-      .select("id,nombre,color,orden,es_final,resultado,es_sin_atender")
-      .order("orden", { ascending: true });
-
-    if (estadosError) throw estadosError;
-
-    const estado = (estados || []).find((item: any) => {
-      const nombre = normalizeForIntent(item.nombre);
-      return nombre === requestedStatus || nombre.includes(requestedStatus) || requestedStatus.includes(nombre);
-    });
-
-    if (!estado?.id) {
-      return {
-        executed: false,
-        ok: false,
-        text: `No encontré un estado de pipeline llamado "${params.action.statusName}". Revisá el nombre del estado e intentá nuevamente.`,
-        action_result: {
-          action: "change_pipeline_status",
-          requested_status: params.action.statusName,
-          available_statuses: (estados || []).map((item: any) => item.nombre)
-        }
-      };
-    }
-
-    const { data: conversation, error: conversationError } = await params.supabase
-      .from("conversaciones")
-      .select(`
-        id,
-        contacto_id,
-        wa_phone,
-        titulo,
-        subject,
-        assigned_to,
-        sucursal_id,
-        estado_gestion,
-        estado_comercial,
-        last_message_preview,
-        last_message_at,
-        whatsapp_24h_expires_at,
-        metadata
-      `)
-      .eq("id", resolvedConversationId)
-      .maybeSingle();
-
-    if (conversationError) throw conversationError;
-
-    if (!conversation?.id) {
-      return {
-        executed: false,
-        ok: false,
-        text: "No encontré la conversación vinculada para cambiar el estado del pipeline.",
-        action_result: null
-      };
-    }
-
-    let contacto: any = null;
-
-    if (conversation.contacto_id) {
-      const { data: contactoData, error: contactoError } = await params.supabase
-        .from("contactos_wa")
-        .select("id,wa_phone,display_name,profile_name,avatar_url")
-        .eq("id", conversation.contacto_id)
-        .maybeSingle();
-
-      if (contactoError) throw contactoError;
-
-      contacto = contactoData || null;
-    }
-
-    if (!oportunidad?.id) {
-      oportunidad = await getOpportunityForConversation({
-        supabase: params.supabase,
-        conversationId: resolvedConversationId
-      });
-    }
-
-    const datosEnriquecidos = enrichOpportunityDatos({
-      oportunidad,
-      conversation,
-      contacto
-    });
-
-    if (!oportunidad?.id) {
-      const { data: insertedOpportunity, error: insertOpportunityError } = await params.supabase
-        .from("lead_oportunidades")
-        .insert({
-          conversacion_id: conversation.id,
-          estado_id: estado.id,
-          score: 0,
-          datos: datosEnriquecidos,
-          assigned_to: conversation.assigned_to || params.userId,
-          cande_activa: false,
-          updated_at: now
-        })
-        .select("*")
-        .single();
-
-      if (insertOpportunityError) throw insertOpportunityError;
-
-      oportunidad = insertedOpportunity;
-    } else {
-      const { error } = await params.supabase
-        .from("lead_oportunidades")
-        .update({
-          estado_id: estado.id,
-          datos: datosEnriquecidos,
-          assigned_to: oportunidad.assigned_to || conversation.assigned_to || params.userId,
-          updated_at: now
-        })
-        .eq("id", oportunidad.id);
-
-      if (error) throw error;
-    }
-
-    const { error: updateConversationError } = await params.supabase
-      .from("conversaciones")
-      .update({
-        estado_gestion: estado.es_sin_atender ? "sin_atender" : "en_gestion",
-        estado_comercial: estado.nombre,
-        updated_at: now
-      })
-      .eq("id", conversation.id);
-
-    if (updateConversationError) throw updateConversationError;
-
-    const nombreContacto =
-      cleanText(datosEnriquecidos.nombre) ||
-      cleanText(datosEnriquecidos.contacto_nombre) ||
-      getDisplayNameFromOpportunity({
-        ...oportunidad,
-        conversacion: conversation,
-        contacto
-      });
-
-    return {
-      executed: true,
-      ok: true,
-      text: `Listo. Cambié la oportunidad de ${nombreContacto} al estado "${estado.nombre}".`,
-      action_result: {
-        action: "change_pipeline_status",
-        conversation_id: resolvedConversationId,
-        oportunidad_id: oportunidad.id,
-        estado_id: estado.id,
-        estado_nombre: estado.nombre,
-        contacto_nombre: nombreContacto,
-        telefono: cleanText(datosEnriquecidos.telefono) || getPhoneFromOpportunity({
-          ...oportunidad,
-          conversacion: conversation,
-          contacto
-        })
-      }
-    };
-  }
-
-  return {
-    executed: false,
-    ok: false,
-    text: "No pude interpretar la acción solicitada.",
-    action_result: null
-  };
+  return data || { ok: true };
 }
+
+/* =========================================================
+   SERVE
+========================================================= */
 
 serve(async (req) => {
   let payload: any = {};
+  let runId: string | null = null;
+  let supabase: any = null;
 
   if (req.method === "OPTIONS") return jsonResponse({ ok: true });
-  if (req.method !== "POST") return jsonResponse({ ok: false, error: "Method not allowed" }, 405);
+  if (req.method !== "POST") return jsonResponse({ ok: false, error: "Method not allowed" }, 200);
 
   try {
-   payload = await req.json();
+    payload = await req.json();
 
-let transcribedText: string | null = null;
+    supabase = getSupabaseAdmin();
 
-if (payload.audio_base64) {
-  transcribedText = await transcribeAudioWithOpenAI({
-    audioBase64: payload.audio_base64,
-    mimeType: payload.audio_mime_type || payload.mime_type || "audio/webm",
-    filename: payload.audio_filename || "nia-audio.webm"
-  });
-}
-
-const userMessage = cleanText(payload.message || payload.text || transcribedText);
-
-if (!userMessage) {
-  return jsonResponse({ ok: false, error: "El mensaje está vacío." }, 200);
-}
-
-    const supabase = getSupabaseAdmin();
-    const userId = await getAuthUserId(req);
     const conversationId = getConversationId(payload);
+    const inboundMessageId = getInboundMessageId(payload);
+    const payloadOportunidadId = getOportunidadId(payload);
 
-    const { conversation, messages } = await loadConversationContext({
+    runId = await createRun({
+      supabase,
+      conversationId,
+      oportunidadId: payloadOportunidadId,
+      inboundMessageId,
+      payload
+    });
+
+    if (!conversationId) {
+      await finishRun({
+        supabase,
+        runId,
+        status: "skipped",
+        reason: "missing_conversation_id",
+        responsePayload: { ok: false }
+      });
+
+      return jsonResponse({
+        ok: false,
+        skipped: true,
+        reason: "missing_conversation_id",
+        text: "Falta conversation_id.",
+        code_version: CODE_VERSION
+      });
+    }
+
+    const [
+      config,
+      campos,
+      faqs,
+      palabrasClave,
+      conversation,
+      inboundMessage
+    ] = await Promise.all([
+      loadCandeConfig({ supabase }),
+      loadCandeCampos({ supabase }),
+      loadCandeFaqs({ supabase }),
+      loadCandePalabrasClave({ supabase }),
+      loadConversation({ supabase, conversationId }),
+      loadInboundMessage({ supabase, inboundMessageId })
+    ]);
+
+    const opportunity = await loadOpportunity({
+      supabase,
+      conversationId,
+      oportunidadId: payloadOportunidadId
+    });
+
+    const messages = await loadMessages({
       supabase,
       conversationId
     });
 
-    const detectedAction = detectNiaAction(userMessage);
+    const gate = shouldCandeReply({
+      config,
+      conversation,
+      opportunity,
+      messages,
+      inboundMessage
+    });
 
-    if (detectedAction) {
-      const actionResponse = await executeNiaAction({
+    if (!gate.ok) {
+      await finishRun({
         supabase,
-        action: detectedAction,
-        conversationId,
-        userId,
-        payload
+        runId,
+        status: "skipped",
+        reason: gate.reason,
+        responsePayload: {
+          ok: false,
+          skipped: true,
+          reason: gate.reason,
+          conversation_id: conversationId,
+          oportunidad_id: opportunity?.id || null
+        }
       });
 
-      const tool = conversationId ? "nia_action_livenos" : "nia_action";
-
-      const auditId = await insertNiaAudit({
-        supabase,
-        userId,
-        payload,
-        userMessage,
-        assistantResponse: actionResponse.text,
-        conversationId: actionResponse.action_result?.conversation_id || conversationId,
-        tool,
-        usedOpenai: false,
-        success: actionResponse.ok,
-        error: actionResponse.ok ? null : actionResponse.text,
-        generalContext: null,
-        actionResult: actionResponse.action_result,
-        actionExecuted: actionResponse.executed
+      return jsonResponse({
+        ok: false,
+        skipped: true,
+        reason: gate.reason,
+        conversation_id: conversationId,
+        oportunidad_id: opportunity?.id || null,
+        code_version: CODE_VERSION
       });
-return jsonResponse(
-  {
-    ok: actionResponse.ok,
-    text: actionResponse.text,
-    tool,
-    conversation_id: actionResponse.action_result?.conversation_id || conversationId,
-    user_id: userId,
-    audit_id: auditId,
-    used_openai: false,
-    action_executed: actionResponse.executed,
-    action_result: actionResponse.action_result,
-    error: actionResponse.ok ? null : actionResponse.text,
-    transcribed_text: transcribedText
-  },
-  200
-);
     }
 
-    const generalContext = conversationId
-      ? null
-      : await loadGeneralCommercialContext({ supabase });
+    const leadAnalysis = await analyzeLeadDataFromInbound({
+      config,
+      campos,
+      conversation,
+      opportunity,
+      inboundMessage
+    });
 
-    const systemPrompt = buildSystemPrompt();
+    const deriveInfo = shouldDeriveByMessage({
+      config,
+      messages,
+      inboundMessage,
+      score: leadAnalysis.score
+    });
+
+    const opportunityForPrompt = {
+      ...opportunity,
+      datos: leadAnalysis.datos,
+      score: leadAnalysis.score
+    };
+
+    const systemPrompt = buildSystemPrompt({
+      config,
+      campos,
+      faqs,
+      palabrasClave,
+      deriveInfo
+    });
 
     const userPrompt = buildUserPrompt({
-      userMessage,
-      context: payload.context || {},
+      config,
       conversation,
+      opportunity: opportunityForPrompt,
       messages,
-      generalContext
+      inboundMessage
     });
 
     const ai = await callOpenAI({
+      config,
       systemPrompt,
       userPrompt
     });
 
-    const tool = conversationId ? "nia_livenos_context" : "nia_chat";
-
-    const finalText = ai.ok
-      ? ai.text
-      : ai.missingKey
-        ? fallbackResponse({
-            userMessage,
-            context: payload.context || {},
-            messages,
-            generalContext,
-            conversationId
-          })
-        : `No pude generar la respuesta de NIA.\n\nDetalle: ${ai.text}`;
-
-    const auditId = await insertNiaAudit({
-      supabase,
-      userId,
-      payload,
-      userMessage,
-      assistantResponse: finalText,
-      conversationId,
-      tool,
-      usedOpenai: ai.ok,
-      success: true,
-      error: ai.ok || ai.missingKey ? null : ai.text,
-      generalContext
+    const finalText = safeCandeText({
+      aiText: ai.text,
+      aiOk: ai.ok,
+      config,
+      conversation,
+      opportunity: opportunityForPrompt,
+      deriveInfo
     });
 
-  return jsonResponse({
-  ok: true,
-  text: finalText,
-  tool,
-  conversation_id: conversationId,
-  user_id: userId,
-  audit_id: auditId,
-  used_openai: ai.ok,
-  transcribed_text: transcribedText,
-  general_context: generalContext
-    ? {
-        open_conversations_count: generalContext.open_conversations_count,
-        unattended_conversations_count: generalContext.unattended_conversations_count,
-        opportunities_count: generalContext.opportunities_count,
-        training_negative_count: generalContext.recent_negative_feedback?.length || 0,
-        training_positive_count: generalContext.recent_positive_feedback?.length || 0
+    const updatedOpportunity = await updateOpportunityAfterReply({
+      supabase,
+      opportunity,
+      conversation,
+      leadAnalysis,
+      deriveInfo
+    });
+
+    const outboundMessage = await insertOutboundMessage({
+      supabase,
+      conversation,
+      opportunity: opportunityForPrompt,
+      config,
+      text: finalText
+    });
+
+    let sendResult: any = null;
+
+    try {
+      sendResult = await callWhatsappSendMessage({
+        conversation,
+        outboundMessage,
+        text: finalText
+      });
+    } catch (sendError) {
+      const sendErrorMessage = getErrorMessage(sendError);
+
+      await markOutboundFailed({
+        supabase,
+        messageId: outboundMessage.id,
+        error: sendErrorMessage
+      });
+
+      await finishRun({
+        supabase,
+        runId,
+        status: "failed",
+        reason: "whatsapp_send_failed",
+        outboundMessageId: outboundMessage.id,
+        responsePayload: {
+          ok: false,
+          text: finalText,
+          ai_ok: ai.ok,
+          ai_error: ai.error,
+          send_error: sendErrorMessage,
+          derive_info: deriveInfo,
+          lead_analysis: {
+            detected_data: leadAnalysis.detected_data,
+            datos: leadAnalysis.datos,
+            score: leadAnalysis.score,
+            ai_used: leadAnalysis.ai_used,
+            ai_error: leadAnalysis.ai_error
+          },
+          updated_opportunity: updatedOpportunity
+        },
+        error: sendErrorMessage
+      });
+
+      return jsonResponse({
+        ok: false,
+        status: "failed",
+        reason: "whatsapp_send_failed",
+        error: sendErrorMessage,
+        text: finalText,
+        outbound_message_id: outboundMessage.id,
+        conversation_id: conversationId,
+        oportunidad_id: opportunity.id,
+        code_version: CODE_VERSION,
+        lead_analysis: {
+          detected_data: leadAnalysis.detected_data,
+          datos: leadAnalysis.datos,
+          score: leadAnalysis.score,
+          ai_used: leadAnalysis.ai_used,
+          ai_error: leadAnalysis.ai_error
+        },
+        updated_opportunity: updatedOpportunity
+      });
+    }
+
+    await finishRun({
+      supabase,
+      runId,
+      status: "sent",
+      reason: "sent",
+      outboundMessageId: outboundMessage.id,
+      responsePayload: {
+        ok: true,
+        text: finalText,
+        ai_ok: ai.ok,
+        ai_error: ai.error,
+        send_result: sendResult,
+        derive_info: deriveInfo,
+        lead_analysis: {
+          detected_data: leadAnalysis.detected_data,
+          datos: leadAnalysis.datos,
+          score: leadAnalysis.score,
+          ai_used: leadAnalysis.ai_used,
+          ai_error: leadAnalysis.ai_error
+        },
+        updated_opportunity: updatedOpportunity,
+        config_used: {
+          config_id: config?.id || null,
+          nombre_ia: getNombreIa(config),
+          marca_visible: getMarcaVisible(config),
+          modelo: cleanText(config?.modelo) || null
+        }
       }
-    : null
-});
+    });
+
+    return jsonResponse({
+      ok: true,
+      status: "sent",
+      code_version: CODE_VERSION,
+      text: finalText,
+      conversation_id: conversationId,
+      oportunidad_id: opportunity.id,
+      outbound_message_id: outboundMessage.id,
+      send_result: sendResult,
+      ai_ok: ai.ok,
+      ai_error: ai.error,
+      derive_info: deriveInfo,
+      lead_analysis: {
+        detected_data: leadAnalysis.detected_data,
+        datos: leadAnalysis.datos,
+        score: leadAnalysis.score,
+        ai_used: leadAnalysis.ai_used,
+        ai_error: leadAnalysis.ai_error
+      },
+      updated_opportunity: updatedOpportunity
+    });
   } catch (error) {
     const errorMessage = getErrorMessage(error);
 
     try {
-      const supabase = getSupabaseAdmin();
-      const conversationId = getConversationId(payload);
+      if (!supabase) {
+        supabase = getSupabaseAdmin();
+      }
 
-      await insertNiaAudit({
+      await finishRun({
         supabase,
-        userId: null,
-        payload,
-        userMessage: cleanText(payload?.message || payload?.text) || "[mensaje no disponible]",
-        assistantResponse: null,
-        conversationId,
-        tool: conversationId ? "nia_livenos_context" : "nia_chat",
-        usedOpenai: false,
-        success: false,
-        error: errorMessage,
-        generalContext: null
+        runId,
+        status: "failed",
+        reason: "exception",
+        responsePayload: {
+          ok: false,
+          error: errorMessage
+        },
+        error: errorMessage
       });
     } catch (auditError) {
-      console.error("[nia-chat] No se pudo auditar error:", getErrorMessage(auditError));
+      console.error("[cande-reply] No se pudo auditar error:", getErrorMessage(auditError));
     }
 
-    return jsonResponse(
-      {
-        ok: false,
-        error: errorMessage
-      },
-      500
-    );
+    return jsonResponse({
+      ok: false,
+      status: "failed",
+      reason: "exception",
+      error: errorMessage,
+      code_version: CODE_VERSION
+    });
   }
 });

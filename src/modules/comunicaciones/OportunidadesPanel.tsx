@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { supabase } from "../../lib/supabase";
 import { ComunicacionesPageShell, EmptyState, MetricCard, Pill } from "./comunicacionesShared";
@@ -55,7 +55,11 @@ function cleanText(value: unknown): string {
   return String(value || "").trim();
 }
 
-function getTextFromDatos(datos: Record<string, unknown> | null | undefined, keys: string[], fallback = "—") {
+function getTextFromDatos(
+  datos: Record<string, unknown> | null | undefined,
+  keys: string[],
+  fallback = "—"
+) {
   if (!datos) return fallback;
 
   for (const key of keys) {
@@ -126,7 +130,11 @@ function getNombreOportunidad(item: OportunidadVM) {
 }
 
 function getTelefonoOportunidad(item: OportunidadVM) {
-  const fromDatos = getTextFromDatos(item.datos, ["telefono", "phone", "wa_phone", "celular", "whatsapp"], "");
+  const fromDatos = getTextFromDatos(
+    item.datos,
+    ["telefono", "phone", "wa_phone", "celular", "whatsapp"],
+    ""
+  );
 
   if (fromDatos) return fromDatos;
 
@@ -140,19 +148,59 @@ function getTelefonoOportunidad(item: OportunidadVM) {
 }
 
 function getDestinoOportunidad(item: OportunidadVM) {
-  return getTextFromDatos(item.datos, ["destino", "destinos", "lugar", "ciudad", "pais", "país"], "Destino sin relevar");
+  return getTextFromDatos(
+    item.datos,
+    ["destino", "destinos", "lugar", "ciudad_destino", "pais", "país"],
+    "Destino sin relevar"
+  );
+}
+
+function getOrigenOportunidad(item: OportunidadVM) {
+  return getTextFromDatos(
+    item.datos,
+    ["origen", "ciudad_origen", "salida_desde", "origen_sugerido"],
+    "Origen sin relevar"
+  );
+}
+
+function getOrigenLabel(item: OportunidadVM) {
+  const origen = getOrigenOportunidad(item);
+  const origenConfirmado = item.datos?.origen_confirmado === true;
+
+  if (origen === "Origen sin relevar") return origen;
+  if (origenConfirmado) return origen;
+
+  if (cleanText(item.datos?.origen_sugerido) && !cleanText(item.datos?.origen)) {
+    return `${origen} sugerido`;
+  }
+
+  return origen;
 }
 
 function getFechaOportunidad(item: OportunidadVM) {
   return getTextFromDatos(
     item.datos,
-    ["fechas", "fechas_tentativas", "fecha", "cuando", "cuándo", "fecha_viaje"],
+    ["fechas_tentativas", "fecha", "fechas", "cuando", "cuándo", "fecha_viaje", "mes"],
     "Fecha sin relevar"
   );
 }
 
 function getPaxOportunidad(item: OportunidadVM) {
-  return getNumberFromDatos(item.datos, ["cantidad_pasajeros", "pax", "pasajeros", "cantidad_pax"]);
+  return getNumberFromDatos(item.datos, [
+    "cantidad_pasajeros",
+    "pax",
+    "pasajeros",
+    "personas",
+    "cantidad_pax"
+  ]);
+}
+
+function getPresupuestoOportunidad(item: OportunidadVM) {
+  return getTextFromDatos(
+    item.datos,
+    ["presupuesto_aproximado", "presupuesto", "budget", "monto_estimado"],
+    "Presupuesto sin relevar"
+  );
 }
 
 function enrichDatos(item: OportunidadVM) {
@@ -184,8 +232,13 @@ export function OportunidadesPanel() {
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
 
-  const loadData = useCallback(async () => {
-    setLoading(true);
+  const realtimeTimerRef = useRef<number | null>(null);
+
+  const loadData = useCallback(async (options: { silent?: boolean } = {}) => {
+    if (!options.silent) {
+      setLoading(true);
+    }
+
     setError(null);
 
     const [estadosRes, oportunidadesRes, conversacionesRes, contactosRes] = await Promise.all([
@@ -216,16 +269,22 @@ export function OportunidadesPanel() {
 
     if (firstError) {
       setError(firstError.message || "Error cargando oportunidades");
-      setLoading(false);
+
+      if (!options.silent) {
+        setLoading(false);
+      }
+
       return;
     }
 
     const conversacionesMap = new Map<string, ConversacionLite>();
+
     ((conversacionesRes.data || []) as ConversacionLite[]).forEach((conv) => {
       conversacionesMap.set(conv.id, conv);
     });
 
     const contactosMap = new Map<string, ContactoWaLite>();
+
     ((contactosRes.data || []) as ContactoWaLite[]).forEach((contacto) => {
       contactosMap.set(contacto.id, contacto);
     });
@@ -249,68 +308,76 @@ export function OportunidadesPanel() {
       return nextOportunidades.find((item) => item.id === current.id) || current;
     });
 
-    setLoading(false);
+    if (!options.silent) {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
     void loadData();
   }, [loadData]);
 
- useEffect(() => {
-  void loadData();
-}, [loadData]);
+  useEffect(() => {
+    const channelName = `oportunidades-realtime-${Date.now()}`;
 
-useEffect(() => {
-  const channelName = `oportunidades-realtime-${Date.now()}`;
+    const refreshSilent = () => {
+      if (realtimeTimerRef.current) {
+        window.clearTimeout(realtimeTimerRef.current);
+      }
 
-  const refresh = () => {
-    void loadData();
-  };
+      realtimeTimerRef.current = window.setTimeout(() => {
+        void loadData({ silent: true });
+      }, 250);
+    };
 
-  const channel = supabase
-    .channel(channelName)
-    .on(
-      "postgres_changes",
-      {
-        event: "*",
-        schema: "public",
-        table: "lead_oportunidades"
-      },
-      refresh
-    )
-    .on(
-      "postgres_changes",
-      {
-        event: "*",
-        schema: "public",
-        table: "conversaciones"
-      },
-      refresh
-    )
-    .on(
-      "postgres_changes",
-      {
-        event: "*",
-        schema: "public",
-        table: "contactos_wa"
-      },
-      refresh
-    )
-    .subscribe((status) => {
-      console.log("[Oportunidades realtime]", status);
-    });
+    const channel = supabase
+      .channel(channelName)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "lead_oportunidades"
+        },
+        refreshSilent
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "conversaciones"
+        },
+        refreshSilent
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "contactos_wa"
+        },
+        refreshSilent
+      )
+      .subscribe((status) => {
+        console.log("[Oportunidades realtime]", status);
+      });
 
-  function handleNiaActionExecuted() {
-    refresh();
-  }
+    function handleNiaActionExecuted() {
+      refreshSilent();
+    }
 
-  window.addEventListener("nostur:nia-action-executed", handleNiaActionExecuted);
+    window.addEventListener("nostur:nia-action-executed", handleNiaActionExecuted);
 
-  return () => {
-    window.removeEventListener("nostur:nia-action-executed", handleNiaActionExecuted);
-    supabase.removeChannel(channel);
-  };
-}, [loadData]);
+    return () => {
+      if (realtimeTimerRef.current) {
+        window.clearTimeout(realtimeTimerRef.current);
+      }
+
+      window.removeEventListener("nostur:nia-action-executed", handleNiaActionExecuted);
+      supabase.removeChannel(channel);
+    };
+  }, [loadData]);
 
   const totalScore = useMemo(() => {
     if (oportunidades.length === 0) return 0;
@@ -371,7 +438,7 @@ useEffect(() => {
       setStatus(`Oportunidad movida a ${estado.nombre}.`);
     }
 
-    await loadData();
+    await loadData({ silent: true });
     setActionLoading(false);
   }
 
@@ -379,31 +446,31 @@ useEffect(() => {
     setDraggingId(item.id);
   }
 
-function handleDragOver(event: React.DragEvent<HTMLElement>, estadoId: string) {
-  event.preventDefault();
-  setDragOverEstadoId(estadoId);
-}
-
-function handleDragLeave(event: React.DragEvent<HTMLElement>, estadoId: string) {
-  event.preventDefault();
-
-  if (dragOverEstadoId === estadoId) {
-    setDragOverEstadoId(null);
+  function handleDragOver(event: React.DragEvent<HTMLElement>, estadoId: string) {
+    event.preventDefault();
+    setDragOverEstadoId(estadoId);
   }
-}
 
-async function handleDrop(event: React.DragEvent<HTMLElement>, estado: PipelineEstado) {
-  event.preventDefault();
+  function handleDragLeave(event: React.DragEvent<HTMLElement>, estadoId: string) {
+    event.preventDefault();
 
-  const item = oportunidades.find((opp) => opp.id === draggingId);
+    if (dragOverEstadoId === estadoId) {
+      setDragOverEstadoId(null);
+    }
+  }
 
-  setDraggingId(null);
-  setDragOverEstadoId(null);
+  async function handleDrop(event: React.DragEvent<HTMLElement>, estado: PipelineEstado) {
+    event.preventDefault();
 
-  if (!item) return;
+    const item = oportunidades.find((opp) => opp.id === draggingId);
 
-  await moveOpportunityToEstado(item, estado);
-}
+    setDraggingId(null);
+    setDragOverEstadoId(null);
+
+    if (!item) return;
+
+    await moveOpportunityToEstado(item, estado);
+  }
 
   function openConversation(item: OportunidadVM) {
     const detail = {
@@ -446,9 +513,16 @@ async function handleDrop(event: React.DragEvent<HTMLElement>, estado: PipelineE
     const nombre = getNombreOportunidad(item);
     const telefono = getTelefonoOportunidad(item);
     const destino = getDestinoOportunidad(item);
+    const origen = getOrigenLabel(item);
     const fechas = getFechaOportunidad(item);
     const pax = getPaxOportunidad(item);
+    const presupuesto = getPresupuestoOportunidad(item);
     const estado = estados.find((estadoItem) => estadoItem.id === item.estado_id) || null;
+
+    const origenSugerido = cleanText(item.datos?.origen_sugerido);
+    const origenAeropuerto = cleanText(item.datos?.origen_sugerido_aeropuerto);
+    const origenConfirmado = item.datos?.origen_confirmado === true;
+
     const ultimoMensaje =
       cleanText(item.datos?.ultimo_mensaje) ||
       cleanText(item.conversacion?.last_message_preview) ||
@@ -456,7 +530,7 @@ async function handleDrop(event: React.DragEvent<HTMLElement>, estado: PipelineE
 
     return (
       <div className="fixed inset-0 z-[900] flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm">
-        <div className="w-full max-w-[860px] overflow-hidden rounded-[28px] bg-white shadow-2xl ring-1 ring-black/10">
+        <div className="w-full max-w-[920px] overflow-hidden rounded-[28px] bg-white shadow-2xl ring-1 ring-black/10">
           <div className="flex items-start justify-between gap-4 border-b border-black/10 px-7 py-6">
             <div className="min-w-0">
               <h2 className="truncate text-2xl font-black text-[#142033]">{nombre}</h2>
@@ -485,6 +559,16 @@ async function handleDrop(event: React.DragEvent<HTMLElement>, estado: PipelineE
                     {estado.nombre}
                   </span>
                 ) : null}
+
+                {item.cande_activa ? (
+                  <span className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-1 text-sm font-black text-emerald-700">
+                    CANDE activa
+                  </span>
+                ) : (
+                  <span className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-1 text-sm font-black text-slate-600">
+                    CANDE pausada
+                  </span>
+                )}
               </div>
             </div>
 
@@ -534,6 +618,18 @@ async function handleDrop(event: React.DragEvent<HTMLElement>, estado: PipelineE
                 </div>
 
                 <div className="rounded-2xl border border-black/10 bg-[#f8fafc] px-4 py-3">
+                  <div className="text-xs font-black uppercase tracking-[0.12em] text-[#64748b]">
+                    Origen {origenConfirmado ? "" : origenSugerido ? "sugerido" : ""}
+                  </div>
+                  <div className="mt-1 text-base font-semibold text-[#142033]">{origen}</div>
+                  {origenSugerido && !origenConfirmado ? (
+                    <div className="mt-1 text-xs font-bold text-[#64748b]">
+                      Pendiente de confirmación{origenAeropuerto ? ` · ${origenAeropuerto}` : ""}
+                    </div>
+                  ) : null}
+                </div>
+
+                <div className="rounded-2xl border border-black/10 bg-[#f8fafc] px-4 py-3">
                   <div className="text-xs font-black uppercase tracking-[0.12em] text-[#64748b]">Fechas tentativas</div>
                   <div className="mt-1 text-base font-semibold text-[#142033]">{fechas}</div>
                 </div>
@@ -541,6 +637,11 @@ async function handleDrop(event: React.DragEvent<HTMLElement>, estado: PipelineE
                 <div className="rounded-2xl border border-black/10 bg-[#f8fafc] px-4 py-3">
                   <div className="text-xs font-black uppercase tracking-[0.12em] text-[#64748b]">Cantidad pasajeros</div>
                   <div className="mt-1 text-base font-semibold text-[#142033]">{pax || "—"}</div>
+                </div>
+
+                <div className="rounded-2xl border border-black/10 bg-[#f8fafc] px-4 py-3">
+                  <div className="text-xs font-black uppercase tracking-[0.12em] text-[#64748b]">Presupuesto</div>
+                  <div className="mt-1 text-base font-semibold text-[#142033]">{presupuesto}</div>
                 </div>
               </div>
             </section>
@@ -583,7 +684,7 @@ async function handleDrop(event: React.DragEvent<HTMLElement>, estado: PipelineE
       title="Oportunidades"
       subtitle="Pipeline comercial nacido desde conversaciones, Cande y NIA."
       badge="Pipeline IA"
-      onRefresh={loadData}
+      onRefresh={() => loadData()}
       loading={loading}
     >
       {renderOpportunityModal()}
@@ -656,6 +757,7 @@ async function handleDrop(event: React.DragEvent<HTMLElement>, estado: PipelineE
                       const nombre = getNombreOportunidad(item);
                       const telefono = getTelefonoOportunidad(item);
                       const destino = getDestinoOportunidad(item);
+                      const origen = getOrigenLabel(item);
                       const fechas = getFechaOportunidad(item);
                       const pax = getPaxOportunidad(item);
                       const isDragging = draggingId === item.id;
@@ -692,6 +794,7 @@ async function handleDrop(event: React.DragEvent<HTMLElement>, estado: PipelineE
 
                           <div className="mt-3 space-y-1 text-xs font-bold text-[#475569]">
                             <p>📍 {destino}</p>
+                            <p>🛫 {origen}</p>
                             <p>🗓 {fechas}</p>
                             <p>👥 {pax || "—"} pax</p>
                           </div>

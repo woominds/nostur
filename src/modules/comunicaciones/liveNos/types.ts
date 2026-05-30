@@ -168,6 +168,11 @@ export type RespuestaRapida = {
   created_by: string | null;
 };
 
+export type CandeFeedbackDraft = {
+  message: Mensaje;
+  tipo: "positivo" | "negativo" | "correccion";
+};
+
 export type ConversationVM = Conversacion & {
   contacto?: ContactoWa | null;
   vendedor?: ProfileLite | null;

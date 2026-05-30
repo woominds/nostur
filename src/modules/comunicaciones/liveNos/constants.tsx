@@ -15,18 +15,20 @@ export const INBOXES: {
   label: string;
   description: string;
   icon: ReactNode;
+  alertTone?: "amber" | "none";
 }[] = [
-  {
-    id: "sin_atender",
-    label: "Sin atender",
-    description: "Conversaciones nuevas o sin vendedor.",
-    icon: <Inbox size={15} />
-  },
   {
     id: "en_gestion",
     label: "En gestión",
     description: "Conversaciones tomadas por vendedores.",
     icon: <UserCheck size={15} />
+  },
+  {
+    id: "sin_atender",
+    label: "Sin atender",
+    description: "Conversaciones nuevas o derivadas por Cande.",
+    icon: <Inbox size={15} />,
+    alertTone: "amber"
   },
   {
     id: "cande",
